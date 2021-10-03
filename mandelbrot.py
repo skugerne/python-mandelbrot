@@ -2,8 +2,7 @@ from cffi import FFI
 from time import time, sleep
 import pygame
 
-max_recursion = 4000   # 1000 can run out before floating point precision does
-
+max_recursion = 4096   # 1000 can run out before floating point precision does
 coordmin_x = -2.00
 coordmax_x = 0.47
 coordrange_x = coordmax_x - coordmin_x
@@ -12,6 +11,29 @@ coordmin_y = -1.12
 coordmax_y = 1.12
 coordrange_y = coordmax_y - coordmin_y
 sector_size = 20    # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
+
+def zap(x):
+    return ((x//4)%256,x//2%128,x%256)
+
+def edge(x):
+    if x < max_recursion-255: return (0,0,0)
+    return (x-(max_recursion-255),x-(max_recursion-255),x-(max_recursion-255))
+
+def tobytes(x):
+    data = bytearray(len(x)*3)
+    for idx,t in enumerate(x):
+        data[idx*3]   = t[0]
+        data[idx*3+1] = t[1]
+        data[idx*3+2] = t[2]
+    return bytes(data)
+
+palettes = [
+    [(255,0,125),(255,0,255),(125,0,255),(0,0,255),(0,125,255),(0,255,255),(0,255,125),(0,255,0),(125,255,0),(255,255,0),(255,125,0),(255,0,0)],
+    [(255,0,0),(0,255,0),(0,0,255),(255,255,255)],
+    [zap(x) for x in range(max_recursion)],
+    [edge(x) for x in range(max_recursion)]           # mostly to identify cases where we run out of recursion
+]
+palettes = [tobytes(x) for x in palettes]
 
 def divide_into_sectors():
     """
@@ -62,6 +84,14 @@ def setup_screen(fullscreen):
 # do some hacky inline C
 ffi = FFI()
 ffi.set_source("inlinehack", """
+unsigned char *palette = NULL;       // RGB values for colors, 3 bytes per color
+int palette_color_count = 0;         // number of colors in palette
+
+void set_palette(unsigned char *data, int color_count){
+    palette = data;
+    palette_color_count = color_count;
+}
+
 int mandlebrot(double coord_x, double coord_y) {
     double x2;
     double x = 0.0;
@@ -76,24 +106,20 @@ int mandlebrot(double coord_x, double coord_y) {
     return count;
 }
 
-void colorize(unsigned char* data, int idx, int iterations){
+void colorize(unsigned char* data, int pixel_idx, int iterations){
+    int pixel_addr = pixel_idx * 3;
+    int color_addr;
     if( iterations == """+str(max_recursion)+""" ){
-        data[idx]=0; data[idx+1]=0; data[idx+2]=0;
-        return;
-    }
-    switch(iterations % 12){
-        case 11: data[idx]=255; data[idx+1]=  0; data[idx+2]=  0; break;
-        case 10: data[idx]=255; data[idx+1]=127; data[idx+2]=  0; break;
-        case  9: data[idx]=255; data[idx+1]=255; data[idx+2]=  0; break;
-        case  8: data[idx]=127; data[idx+1]=255; data[idx+2]=  0; break;
-        case  7: data[idx]=  0; data[idx+1]=255; data[idx+2]=  0; break;
-        case  6: data[idx]=  0; data[idx+1]=255; data[idx+2]=127; break;
-        case  5: data[idx]=  0; data[idx+1]=255; data[idx+2]=255; break;
-        case  4: data[idx]=  0; data[idx+1]=127; data[idx+2]=255; break;
-        case  3: data[idx]=  0; data[idx+1]=  0; data[idx+2]=255; break;
-        case  2: data[idx]=127; data[idx+1]=  0; data[idx+2]=255; break;
-        case  1: data[idx]=255; data[idx+1]=  0; data[idx+2]=255; break;
-        default: data[idx]=255; data[idx+1]=  0; data[idx+2]=127; break;
+        data[pixel_addr]   = 0;
+        data[pixel_addr+1] = 0;
+        data[pixel_addr+2] = 0;
+    }else{
+        if( iterations >= palette_color_count )
+            iterations %= palette_color_count;
+        color_addr = iterations * 3;
+        data[pixel_addr]   = palette[color_addr];
+        data[pixel_addr+1] = palette[color_addr+1];
+        data[pixel_addr+2] = palette[color_addr+2];
     }
 }
 
@@ -105,9 +131,11 @@ void compute_sector(unsigned char* data, double start_coord_x, double start_coor
     for(int x=0; x<"""+str(sector_size)+"""; ++x){
         coord_y = start_coord_y;
         for(int y=0; y<"""+str(sector_size)+"""; ++y){
-            idx = (x + y*"""+str(sector_size)+""") * 3;
-            iterations = mandlebrot(coord_x,coord_y);
-            colorize(data,idx,iterations);
+            colorize(
+                data,
+                (x + y*"""+str(sector_size)+"""),
+                mandlebrot(coord_x,coord_y)
+            );
             coord_y += step_y;
         }
         coord_x += step_x;
@@ -115,11 +143,15 @@ void compute_sector(unsigned char* data, double start_coord_x, double start_coor
 }
 """)
 ffi.cdef("""
+extern unsigned char *palette;          // RGB values for colors, 3 bytes per color
+extern int palette_color_count;         // number of colors in palette
+void set_palette(unsigned char *,int);
 long mandlebrot(double,double);
 void compute_sector(unsigned char *,double,double,double,double);
 """)
 print("Compile...")
 ffi.compile()
+print("Import...")
 from inlinehack import lib     # import the compiled library
 
 
@@ -135,8 +167,10 @@ clickables = {
     'autozoom': True,
     'maxzoomed': False,
     'minzoomed': False,
-    'redraw': False
+    'palette': 0,
+    'redraw': True
 }
+lib.set_palette(palettes[clickables['palette']], len(palettes[clickables['palette']])//3)
 
 # respond to mouseover
 def draw_button_box(mouse_coord, rect):
@@ -237,7 +271,10 @@ def draw_text_labels(todolen):
     switch_colors_rect =  pygame.Rect(topleft,text_surface_2.get_size())
     def switch_colors(coord):
         if not switch_colors_rect.collidepoint(coord): return False
-        print("Switching palettes is currently disabled.")
+        clickables['redraw'] = True
+        clickables['palette'] += 1
+        if clickables['palette'] >= len(palettes): clickables['palette'] = 0
+        lib.set_palette(palettes[clickables['palette']], len(palettes[clickables['palette']])//3)
         return True
     clickboxes.append(switch_colors)
     draw_button_box(mouse_coord, switch_colors_rect)
@@ -266,7 +303,6 @@ def mouse_to_sim(coord, clickboxes):
 simx,simy = mouse_to_sim((0, window_y // 2), [])    # default zoom target
 todo = []
 sleepstart = None
-clickables['redraw'] = True
 rawdata = b"0" * (sector_size*sector_size*3)
 while clickables['run']:
     if clickables['redraw'] and (not todo):
