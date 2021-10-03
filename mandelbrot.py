@@ -12,9 +12,6 @@ coordmin_y = -1.12
 coordmax_y = 1.12
 coordrange_y = coordmax_y - coordmin_y
 sector_size = 20    # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
-window_x = 800      # should fit on any screen
-window_y = int(round(window_x * coordrange_y / coordrange_x))
-print("Window: %d x %d." % (window_x,window_y))
 
 def divide_into_sectors():
     """
@@ -39,6 +36,28 @@ def divide_into_sectors():
     coord_y = coordmin_y + coordrange_y/2
     coordrange_y = coordrange_x * window_y / window_x
     coordmin_y = coord_y - coordrange_y/2
+
+def setup_screen(fullscreen):
+    """
+    Enter or leave full screen mode.
+    """
+
+    global screen, window_x, window_y
+
+    if fullscreen:
+        resolutions = sorted(pygame.display.list_modes(), reverse=True)
+        if not resolutions:
+            print("No fullscreen resolutions.")
+            return
+        window_x,window_y = resolutions[0]
+        print("Fullscreen: %d x %d." % (window_x,window_y))
+        screen = pygame.display.set_mode((window_x,window_y), pygame.FULLSCREEN)
+    else:
+        window_x = 800      # should fit on any screen
+        window_y = int(round(window_x * coordrange_y / coordrange_x))
+        print("Window: %d x %d." % (window_x,window_y))
+        screen = pygame.display.set_mode((window_x,window_y), pygame.RESIZABLE)
+    divide_into_sectors()
 
 # do some hacky inline C
 ffi = FFI()
@@ -103,19 +122,21 @@ print("Compile...")
 ffi.compile()
 from inlinehack import lib     # import the compiled library
 
+
+
 # start up the user interface
 pygame.init()
-screen = pygame.display.set_mode((window_x,window_y), pygame.RESIZABLE)
+setup_screen(False)
 pygame.display.set_caption('Mandelbrot')
 font = pygame.font.Font(pygame.font.get_default_font(), 14)
 clickables = {
     'run': True,
+    'fullscreen': False,
     'autozoom': True,
     'maxzoomed': False,
     'minzoomed': False,
     'redraw': False
 }
-divide_into_sectors()
 
 # respond to mouseover
 def draw_button_box(mouse_coord, rect):
@@ -146,6 +167,27 @@ def draw_text_labels(todolen):
         return True
     clickboxes.append(quit_btn)
     draw_button_box(mouse_coord, quit_rect)
+
+    if clickables['fullscreen']:
+        text = 'Windowed'
+    else:
+        text = 'Fullscreen'
+    text_surface = font.render(text, True, textcolor, backgroundcolor)
+    text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+6,text_surface.get_size()[1]+6))
+    text_surface_2.fill(backgroundcolor)
+    text_surface_2.blit(text_surface, dest=(3,3))
+    topleft = (right_edge+10,10)
+    screen.blit(text_surface_2, dest=topleft)
+    right_edge += text_surface_2.get_size()[0] + 10
+    fullscreen_rect =  pygame.Rect(topleft,text_surface_2.get_size())
+    def toggle_fullscreen(coord):
+        if not fullscreen_rect.collidepoint(coord): return False
+        clickables['fullscreen'] = not clickables['fullscreen']
+        setup_screen(clickables['fullscreen'])
+        clickables['redraw'] = True
+        return True
+    clickboxes.append(toggle_fullscreen)
+    draw_button_box(mouse_coord, fullscreen_rect)
 
     zoom = coordrange_x_orig / coordrange_x
     if zoom > 20*1000*1000*1000*1000:
