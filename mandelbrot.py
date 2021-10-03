@@ -3,44 +3,7 @@ from cffi import FFI
 from time import time, sleep
 import pygame
 
-def rainbow(x):
-    v = x % 12
-    if v == 11: return (255,0,0)      # red
-    if v == 10: return (255,125,0)    # orange
-    if v == 9: return (255,255,0)     # yellow
-    if v == 8: return (125,255,0)
-    if v == 7: return (0,255,0)       # green
-    if v == 6: return (0,255,125)     # turquiose
-    if v == 5: return (0,255,255)     # cyan
-    if v == 4: return (0,125,255)
-    if v == 3: return (0,0,255)       # blue
-    if v == 2: return (125,0,255)     # violet
-    if v == 1: return (255,0,255)     # magenta
-    return (255,0,125)
-
-def rgb(x):
-    v = x % 4
-    if v == 3: return (255,0,0)
-    if v == 2: return (0,255,0)
-    if v == 1: return (0,0,255)
-    return (255,255,255)
-
-def zap(x):
-    return ((x//4)%256,x//2%128,x%256)
-
-def edge(x):
-    if x < max_recursion-255: return (0,0,0)
-    return (x-(max_recursion-255),x-(max_recursion-255),x-(max_recursion-255))
-
 max_recursion = 4000   # 1000 can run out before floating point precision does
-palettes = [
-    [rainbow(x) for x in range(max_recursion+1)],
-    [rgb(x) for x in range(max_recursion+1)],
-    [zap(x) for x in range(max_recursion+1)],
-    [edge(x) for x in range(max_recursion+1)]           # mostly to identify cases where we run out of recursion
-]
-for p in palettes:
-    p[max_recursion] = (0,0,0)   # always black for the mandelbrot set itself
 
 coordmin_x = -2.00
 coordmax_x = 0.47
@@ -70,11 +33,11 @@ sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumer
 # do some hacky inline C
 ffi = FFI()
 ffi.set_source("inlinehack", """
-long mandlebrot(double coord_x, double coord_y) {
+int mandlebrot(double coord_x, double coord_y) {
     double x2;
     double x = 0.0;
     double y = 0.0;
-    long count = 0;
+    int count = 0;
     while( x*x + y*y <= 4.0 && count < """+str(max_recursion)+""" ){
         x2 = x*x - y*y + coord_x;
         y = 2.0*x*y + coord_y;
@@ -83,27 +46,52 @@ long mandlebrot(double coord_x, double coord_y) {
     }
     return count;
 }
+
+void colorize(unsigned char* data, int idx, int iterations){
+    if( iterations == """+str(max_recursion)+""" ){
+        data[idx]=0; data[idx+1]=0; data[idx+2]=0;
+        return;
+    }
+    switch(iterations % 12){
+        case 11: data[idx]=255; data[idx+1]=  0; data[idx+2]=  0; break;
+        case 10: data[idx]=255; data[idx+1]=127; data[idx+2]=  0; break;
+        case  9: data[idx]=255; data[idx+1]=255; data[idx+2]=  0; break;
+        case  8: data[idx]=127; data[idx+1]=255; data[idx+2]=  0; break;
+        case  7: data[idx]=  0; data[idx+1]=255; data[idx+2]=  0; break;
+        case  6: data[idx]=  0; data[idx+1]=255; data[idx+2]=127; break;
+        case  5: data[idx]=  0; data[idx+1]=255; data[idx+2]=255; break;
+        case  4: data[idx]=  0; data[idx+1]=127; data[idx+2]=255; break;
+        case  3: data[idx]=  0; data[idx+1]=  0; data[idx+2]=255; break;
+        case  2: data[idx]=127; data[idx+1]=  0; data[idx+2]=255; break;
+        case  1: data[idx]=255; data[idx+1]=  0; data[idx+2]=255; break;
+        default: data[idx]=255; data[idx+1]=  0; data[idx+2]=127; break;
+    }
+}
+
+void compute_sector(unsigned char* data, double start_coord_x, double start_coord_y, double step_x, double step_y) {
+    double coord_x = start_coord_x;
+    double coord_y;
+    int iterations;
+    int idx = 0;
+    for(int x=0; x<"""+str(sector_size)+"""; ++x){
+        coord_y = start_coord_y;
+        for(int y=0; y<"""+str(sector_size)+"""; ++y){
+            idx = (x + y*"""+str(sector_size)+""") * 3;
+            iterations = mandlebrot(coord_x,coord_y);
+            colorize(data,idx,iterations);
+            coord_y += step_y;
+        }
+        coord_x += step_x;
+    }
+}
 """)
-ffi.cdef("""long mandlebrot(double,double);""")
+ffi.cdef("""
+long mandlebrot(double,double);
+void compute_sector(unsigned char *,double,double,double,double);
+""")
 print("Compile...")
 ffi.compile()
 from inlinehack import lib     # import the compiled library
-
-# use that C to draw a sector of the screen
-def draw_sector(sector_idx, coordmin_x, coordmin_y, coordrange_x, coordrange_y):
-    palette = palettes[clickables['palette']]
-    min_px = sectors[sector_idx][0]
-    min_py = sectors[sector_idx][1]
-    im = Image.new(size=(sector_size,sector_size), mode='RGB', color=(0,0,0))
-    for x in range(sector_size):
-        px = x + min_px
-        coord_x = coordmin_x + coordrange_x * px/window_x
-        for y in range(sector_size):
-            py = y + min_py
-            coord_y = coordmin_y + coordrange_y * py/window_y   # not the most efficient coordinate calculation, but should maintain more precision
-            count = lib.mandlebrot(coord_x, coord_y)
-            im.putpixel((x,y),palette[count])
-    return im
 
 # start up the user interface
 pygame.init()
@@ -115,7 +103,6 @@ clickables = {
     'autozoom': True,
     'maxzoomed': False,
     'minzoomed': False,
-    'palette': 0,
     'redraw': False
 }
 
@@ -199,9 +186,7 @@ def draw_text_labels(todolen):
     switch_colors_rect =  pygame.Rect(topleft,text_surface_2.get_size())
     def switch_colors(coord):
         if not switch_colors_rect.collidepoint(coord): return False
-        clickables['redraw'] = True
-        clickables['palette'] += 1
-        if clickables['palette'] >= len(palettes): clickables['palette'] = 0
+        print("Switching palettes is currently disabled.")
         return True
     clickboxes.append(switch_colors)
     draw_button_box(mouse_coord, switch_colors_rect)
@@ -231,6 +216,7 @@ simx,simy = mouse_to_sim((0, window_y // 2), [])    # default zoom target
 todo = []
 sleepstart = None
 clickables['redraw'] = True
+rawdata = b"0" * (sector_size*sector_size*3)
 while clickables['run']:
     if clickables['redraw'] and (not todo):
         todo = sectorindexes[:]   # copy because we will destroy it
@@ -238,8 +224,10 @@ while clickables['run']:
     if todo and ((not sleepstart) or time() - sleepstart > 1):
         sleepstart = None
         sector_idx = todo.pop()
-        im = draw_sector(sector_idx, coordmin_x, coordmin_y, coordrange_x, coordrange_y)
-        surface = pygame.image.fromstring(im.tobytes(), im.size, im.mode)
+        start_coord_x = coordmin_x + (coordrange_x * sectors[sector_idx][0])/window_x
+        start_coord_y = coordmin_y + (coordrange_y * sectors[sector_idx][1])/window_y
+        lib.compute_sector(rawdata, start_coord_x, start_coord_y, coordrange_x/window_x, coordrange_y/window_y)
+        surface = pygame.image.fromstring(rawdata, (sector_size,sector_size), "RGB")
         screen.blit(surface,sectors[sector_idx])
 
         # pause to display complete result a moment
