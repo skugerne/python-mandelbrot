@@ -1,4 +1,3 @@
-from PIL import Image
 from cffi import FFI
 from time import time, sleep
 import pygame
@@ -12,23 +11,34 @@ coordrange_x_orig = coordrange_x
 coordmin_y = -1.12
 coordmax_y = 1.12
 coordrange_y = coordmax_y - coordmin_y
-sector_size = 16
-window_x = 850 // sector_size * sector_size
-window_y = int(round(window_x * (coordrange_y / coordrange_x))) // sector_size * sector_size
+sector_size = 20    # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
+window_x = 800      # should fit on any screen
+window_y = int(round(window_x * coordrange_y / coordrange_x))
 print("Window: %d x %d." % (window_x,window_y))
 
-# we divide work into sectors
-sectors = []
-for x in range(0, window_x, sector_size):
-    for y in range(0, window_y, sector_size):
-        sectors.append((x,y))
-print("Have divided window into %d sectors." % len(sectors))
+def divide_into_sectors():
+    """
+    Divide the screen / coordinate system into sectors for processing, update Y-coordinate scaling info based on X.
+    """
 
-def dist(coord):
-    return (coord[0]-(window_x+sector_size)/2)**2 + (coord[1]-(window_y+sector_size)/2)**2
+    global sectors, sectorindexes, window_x, window_y, coordmin_y, coordrange_y
+    sectors = []
+    window_x,window_y = pygame.display.get_window_size()
+    for x in range(0, window_x, sector_size):
+        for y in range(0, window_y, sector_size):
+            sectors.append((x,y))
+    print("Have divided window into %d sectors." % len(sectors))
 
-# we draw sectors that are closest to the screen center first
-sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumerate(sectors)], reverse=True)]
+    def dist(coord):
+        return (coord[0]-(window_x+sector_size)/2)**2 + (coord[1]-(window_y+sector_size)/2)**2
+
+    # we draw sectors that are closest to the screen center first
+    sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumerate(sectors)], reverse=True)]
+
+    # keep the Y coordinate centered the same, and keep the coordinate ratio right
+    coord_y = coordmin_y + coordrange_y/2
+    coordrange_y = coordrange_x * window_y / window_x
+    coordmin_y = coord_y - coordrange_y/2
 
 # do some hacky inline C
 ffi = FFI()
@@ -95,7 +105,7 @@ from inlinehack import lib     # import the compiled library
 
 # start up the user interface
 pygame.init()
-screen = pygame.display.set_mode((window_x,window_y))
+screen = pygame.display.set_mode((window_x,window_y), pygame.RESIZABLE)
 pygame.display.set_caption('Mandelbrot')
 font = pygame.font.Font(pygame.font.get_default_font(), 14)
 clickables = {
@@ -105,16 +115,15 @@ clickables = {
     'minzoomed': False,
     'redraw': False
 }
+divide_into_sectors()
 
 # respond to mouseover
 def draw_button_box(mouse_coord, rect):
      if rect.collidepoint(mouse_coord):
         color = (0,255,0)
-        width = 2
      else:
         color = (0,0,0)
-        width = 2
-     pygame.draw.lines(screen, color, True, ((rect.topleft, rect.bottomleft, rect.bottomright, rect.topright)), width=width)
+     pygame.draw.lines(screen, color, True, ((rect.topleft, rect.bottomleft, rect.bottomright, rect.topright)), width=2)
 
 # draw buttons, etc
 def draw_text_labels(todolen):
@@ -254,6 +263,11 @@ while clickables['run']:
                 clickables['redraw'] = True
                 coordmin_x = simx - coordrange_x/2
                 coordmin_y = simy - coordrange_y/2
+        elif event.type == pygame.VIDEORESIZE:
+            print("Got a window resize/sizechanged event.")
+            divide_into_sectors()
+            todo = []
+            clickables['redraw'] = True
 
     # handle autozoom
     if clickables['autozoom'] and (not todo) and (not clickables['maxzoomed']):
