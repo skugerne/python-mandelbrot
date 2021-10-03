@@ -28,9 +28,9 @@ def tobytes(x):
     return bytes(data)
 
 palettes = [
+    [zap(x) for x in range(max_recursion)],
     [(255,0,125),(255,0,255),(125,0,255),(0,0,255),(0,125,255),(0,255,255),(0,255,125),(0,255,0),(125,255,0),(255,255,0),(255,125,0),(255,0,0)],
     [(255,0,0),(0,255,0),(0,0,255),(255,255,255)],
-    [zap(x) for x in range(max_recursion)],
     [edge(x) for x in range(max_recursion)]           # mostly to identify cases where we run out of recursion
 ]
 palettes = [tobytes(x) for x in palettes]
@@ -126,8 +126,6 @@ void colorize(unsigned char* data, int pixel_idx, int iterations){
 void compute_sector(unsigned char* data, double start_coord_x, double start_coord_y, double step_x, double step_y) {
     double coord_x = start_coord_x;
     double coord_y;
-    int iterations;
-    int idx = 0;
     for(int x=0; x<"""+str(sector_size)+"""; ++x){
         coord_y = start_coord_y;
         for(int y=0; y<"""+str(sector_size)+"""; ++y){
@@ -168,7 +166,8 @@ clickables = {
     'maxzoomed': False,
     'minzoomed': False,
     'palette': 0,
-    'redraw': True
+    'redraw': True,
+    'mousedown': None
 }
 lib.set_palette(palettes[clickables['palette']], len(palettes[clickables['palette']])//3)
 
@@ -306,6 +305,7 @@ sleepstart = None
 rawdata = b"0" * (sector_size*sector_size*3)
 while clickables['run']:
     if clickables['redraw'] and (not todo):
+        print("Redraw all sectors...")
         todo = sectorindexes[:]   # copy because we will destroy it
 
     if todo and ((not sleepstart) or time() - sleepstart > 1):
@@ -325,30 +325,52 @@ while clickables['run']:
         sleep(0.05)    # avoid using CPU for nothing
 
     clickboxes = draw_text_labels(len(todo))
-
-    # flip the display
     pygame.display.flip()
 
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             clickables['run'] = False
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            newcoord = mouse_to_sim(pygame.mouse.get_pos(), clickboxes)
-            if newcoord:
-                # handle a mouse click that did not hit a button
-                simx,simy = newcoord
-                todo = []
+            clickables['mousedown'] = pygame.mouse.get_pos()
+        elif event.type == pygame.MOUSEBUTTONUP:
+            mousecoord = pygame.mouse.get_pos()
+            if clickables['mousedown']:
+                d = abs(mousecoord[0]-clickables['mousedown'][0]) + abs(mousecoord[1]-clickables['mousedown'][1])
+                dragged = bool(d > 2)
+            else:
+                dragged = False
+            if not dragged:
+                newcoord = mouse_to_sim(mousecoord, clickboxes)
+                if newcoord:
+                    print("Mouse click to set center...")
+                    simx,simy = newcoord
+                    todo = []
+                    clickables['redraw'] = True
+                    coordmin_x = simx - coordrange_x/2
+                    coordmin_y = simy - coordrange_y/2
+                else:
+                    print("Mouse click on button...")
+            else:
+                print("Mouse drag...")
+                drag_px = mousecoord[0] - clickables['mousedown'][0]   # positive means dragging right
+                drag_py = mousecoord[1] - clickables['mousedown'][1]   # positive means dragging down
+                screen.blit(screen,(drag_px,drag_py))
+                pygame.display.flip()
+                simx,simy = mouse_to_sim(mousecoord, [])
+                todo = []   # fill with things that need to be redrawn
                 clickables['redraw'] = True
-                coordmin_x = simx - coordrange_x/2
-                coordmin_y = simy - coordrange_y/2
+                coordmin_x -= coordrange_x * drag_px / window_x
+                coordmin_y -= coordrange_y * drag_py / window_y
+            clickables['mousedown'] = None
         elif event.type == pygame.VIDEORESIZE:
-            print("Got a window resize/sizechanged event.")
+            print("Window resize/sizechanged event...")
             divide_into_sectors()
             todo = []
             clickables['redraw'] = True
 
     # handle autozoom
     if clickables['autozoom'] and (not todo) and (not clickables['maxzoomed']):
+        print("Autozoom...")
         coordmin_x += coordrange_x * 0.05
         coordmin_y += coordrange_y * 0.05
         coordrange_x *= 0.9
