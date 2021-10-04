@@ -161,6 +161,7 @@ pygame.init()
 setup_screen(False)
 pygame.display.set_caption('Mandelbrot')
 font = pygame.font.Font(pygame.font.get_default_font(), 14)
+textcache = dict()
 clickables = {
     'run': True,
     'fullscreen': False,
@@ -174,31 +175,48 @@ clickables = {
 }
 lib.set_palette(palettes[clickables['palette']], len(palettes[clickables['palette']])//3)
 
-# respond to mouseover
 def draw_button_box(mouse_coord, rect):
-     if rect.collidepoint(mouse_coord):
-        color = (0,255,0)
-     else:
-        color = (0,0,0)
-     pygame.draw.lines(screen, color, True, ((rect.topleft, rect.bottomleft, rect.bottomright, rect.topright)), width=2)
+    """
+    Draw a box around a button.
+    """
+    if rect.collidepoint(mouse_coord):
+       color = (0,255,0)
+    else:
+       color = (0,0,0)
+    pygame.draw.lines(screen, color, True, ((rect.topleft, rect.bottomleft, rect.bottomright, rect.topright)), width=2)
 
-# draw buttons, etc
+def text_box(text, textcolor, backgroundcolor):
+    """
+    Create and cache a surface with text on it.
+    """
+    spacing = 4
+    key = (text,textcolor,backgroundcolor)
+    if key in textcache:
+        return textcache[key]
+    text_surface = font.render(text, True, textcolor, backgroundcolor)
+    text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+spacing*2,text_surface.get_size()[1]+spacing*2))
+    text_surface_2.fill(backgroundcolor)
+    text_surface_2.blit(text_surface, dest=(spacing,spacing))
+    textcache[key] = text_surface_2
+    return text_surface_2
+
 def draw_text_labels(todolen):
+    """
+    Draw the buttons and status fields.
+    """
+
     clickboxes = []
     mouse_coord = pygame.mouse.get_pos()
     textcolor = (0, 0, 0)
     backgroundcolor = (128,128,128)
+    spacing = 10
 
-    # FIXME: should cache surfaces that are used repeatedly
-    text_surface = font.render("Quit", True, textcolor, backgroundcolor)
-    text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+6,text_surface.get_size()[1]+6))
-    text_surface_2.fill(backgroundcolor)
-    text_surface_2.blit(text_surface, dest=(3,3))
-    clickables['text_hieght'] = text_surface.get_size()[1]+10
-    topleft = (10,10)
-    screen.blit(text_surface_2, dest=topleft)
-    right_edge = text_surface_2.get_size()[0] + 10
-    quit_rect =  pygame.Rect(topleft,text_surface_2.get_size())
+    text_surface = text_box("Quit", textcolor, backgroundcolor)
+    clickables['text_hieght'] = text_surface.get_size()[1] + spacing + 2
+    topleft = (spacing,spacing)
+    screen.blit(text_surface, dest=topleft)
+    right_edge = text_surface.get_size()[0] + spacing
+    quit_rect =  pygame.Rect(topleft,text_surface.get_size())
     def quit_btn(coord):
         if not quit_rect.collidepoint(coord): return False
         clickables['run'] = False
@@ -210,14 +228,11 @@ def draw_text_labels(todolen):
         text = 'Windowed'
     else:
         text = 'Fullscreen'
-    text_surface = font.render(text, True, textcolor, backgroundcolor)
-    text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+6,text_surface.get_size()[1]+6))
-    text_surface_2.fill(backgroundcolor)
-    text_surface_2.blit(text_surface, dest=(3,3))
-    topleft = (right_edge+10,10)
-    screen.blit(text_surface_2, dest=topleft)
-    right_edge += text_surface_2.get_size()[0] + 10
-    fullscreen_rect =  pygame.Rect(topleft,text_surface_2.get_size())
+    text_surface = text_box(text, textcolor, backgroundcolor)
+    topleft = (right_edge+spacing,spacing)
+    screen.blit(text_surface, dest=topleft)
+    right_edge += text_surface.get_size()[0] + spacing
+    fullscreen_rect =  pygame.Rect(topleft,text_surface.get_size())
     def toggle_fullscreen(coord):
         if not fullscreen_rect.collidepoint(coord): return False
         clickables['fullscreen'] = not clickables['fullscreen']
@@ -230,25 +245,19 @@ def draw_text_labels(todolen):
     zoom = coordrange_x_orig / coordrange_x
     if zoom > 20*1000*1000*1000*1000:
         clickables['maxzoomed'] = True
-    text_surface = font.render('Zoom: %0.1fX' % zoom, True, textcolor, backgroundcolor)
-    text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+6,text_surface.get_size()[1]+6))
-    text_surface_2.fill(backgroundcolor)
-    text_surface_2.blit(text_surface, dest=(3,3))
-    screen.blit(text_surface_2, dest=(right_edge+10,10))
-    right_edge += text_surface_2.get_size()[0] + 10
+    text_surface = text_box('Zoom: %0.1fX' % zoom, textcolor, backgroundcolor)
+    screen.blit(text_surface, dest=(right_edge+spacing,spacing))
+    right_edge += text_surface.get_size()[0] + spacing
 
     if clickables['autozoom']:
         text = 'Stop zooming'
     else:
         text = 'Start zooming'
-    text_surface = font.render(text, True, textcolor, backgroundcolor)
-    text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+6,text_surface.get_size()[1]+6))
-    text_surface_2.fill(backgroundcolor)
-    text_surface_2.blit(text_surface, dest=(3,3))
-    topleft = (right_edge+10,10)
-    screen.blit(text_surface_2, dest=topleft)
-    right_edge += text_surface_2.get_size()[0] + 10
-    autozoom_rect =  pygame.Rect(topleft,text_surface_2.get_size())
+    text_surface = text_box(text, textcolor, backgroundcolor)
+    topleft = (right_edge+spacing,spacing)
+    screen.blit(text_surface, dest=topleft)
+    right_edge += text_surface.get_size()[0] + spacing
+    autozoom_rect =  pygame.Rect(topleft,text_surface.get_size())
     def toggle_autozoom(coord):
         if not autozoom_rect.collidepoint(coord): return False
         clickables['autozoom'] = not clickables['autozoom']
@@ -257,22 +266,16 @@ def draw_text_labels(todolen):
     draw_button_box(mouse_coord, autozoom_rect)
 
     if clickables['maxzoomed']:
-        text_surface = font.render('No more floating point precision', True, (255, 0, 0), backgroundcolor)
-        text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+6,text_surface.get_size()[1]+6))
-        text_surface_2.fill(backgroundcolor)
-        text_surface_2.blit(text_surface, dest=(3,3))
-        topleft = (right_edge+10,10)
-        screen.blit(text_surface_2, dest=topleft)
-        right_edge += text_surface_2.get_size()[0] + 10
+        text_surface = text_box('No more floating point precision', (255, 0, 0), backgroundcolor)
+        topleft = (right_edge+spacing,spacing)
+        screen.blit(text_surface, dest=topleft)
+        right_edge += text_surface.get_size()[0] + spacing
 
-    text_surface = font.render("Switch colors", True, textcolor, backgroundcolor)
-    text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+6,text_surface.get_size()[1]+6))
-    text_surface_2.fill(backgroundcolor)
-    text_surface_2.blit(text_surface, dest=(3,3))
-    topleft = (right_edge+10,10)
-    screen.blit(text_surface_2, dest=topleft)
-    right_edge += text_surface_2.get_size()[0] + 10
-    switch_colors_rect =  pygame.Rect(topleft,text_surface_2.get_size())
+    text_surface = text_box("Switch colors", textcolor, backgroundcolor)
+    topleft = (right_edge+spacing,spacing)
+    screen.blit(text_surface, dest=topleft)
+    right_edge += text_surface.get_size()[0] + spacing
+    switch_colors_rect =  pygame.Rect(topleft,text_surface.get_size())
     def switch_colors(coord):
         if not switch_colors_rect.collidepoint(coord): return False
         clickables['redraw'] = True
@@ -284,13 +287,10 @@ def draw_text_labels(todolen):
     draw_button_box(mouse_coord, switch_colors_rect)
     
     perc = int(round(100 * todolen / len(sectors)))
-    text_surface = font.render('todo: %3d%%' % perc, True, textcolor, backgroundcolor)
-    text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+6,text_surface.get_size()[1]+6))
-    text_surface_2.fill(backgroundcolor)
-    text_surface_2.blit(text_surface, dest=(3,3))
-    topleft = (right_edge+10,10)
-    screen.blit(text_surface_2, dest=topleft)
-    right_edge += text_surface_2.get_size()[0] + 10
+    text_surface = text_box('todo: %3d%%' % perc, textcolor, backgroundcolor)
+    topleft = (right_edge+spacing,spacing)
+    screen.blit(text_surface, dest=topleft)
+    right_edge += text_surface.get_size()[0] + spacing
 
     return clickboxes
 
@@ -364,7 +364,7 @@ def reconsider_todo(todo, drag_px, drag_py):
         if drag_py % sector_size:
             newtodo.add(coord_to_sector_idx(x,y+sector_size))
     newnewtodo = []
-    for idx in sectorindexes:    # get sectors sorted by distance from the center
+    for idx in sectorindexes:    # get these sectors sorted by distance from the center
         if idx in newtodo:
             newnewtodo.append(idx)
     print("After drag there are %d sectors todo." % len(newnewtodo))
