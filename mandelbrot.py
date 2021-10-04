@@ -40,7 +40,7 @@ def divide_into_sectors():
     Divide the screen / coordinate system into sectors for processing, update Y-coordinate scaling info based on X.
     """
 
-    global sectors, sectorindexes, window_x, window_y, coordmin_y, coordrange_y
+    global sectors, coord_to_sectorindex, sectorindexes, window_x, window_y, coordmin_y, coordrange_y
     sectors = []
     window_x,window_y = pygame.display.get_window_size()
     for x in range(0, window_x, sector_size):
@@ -52,7 +52,9 @@ def divide_into_sectors():
         return (coord[0]-(window_x+sector_size)/2)**2 + (coord[1]-(window_y+sector_size)/2)**2
 
     # we draw sectors that are closest to the screen center first
+    # this contains a list of indexes, sorted with highest priority first
     sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumerate(sectors)], reverse=True)]
+    #coord_to_sectorindex = dict((coord,idx) for idx,coord in enumerate(sectors))
 
     # keep the Y coordinate centered the same, and keep the coordinate ratio right
     coord_y = coordmin_y + coordrange_y/2
@@ -167,7 +169,8 @@ clickables = {
     'minzoomed': False,
     'palette': 0,
     'redraw': True,
-    'mousedown': None
+    'mousedown': None,
+    'text_hieght': 0
 }
 lib.set_palette(palettes[clickables['palette']], len(palettes[clickables['palette']])//3)
 
@@ -186,10 +189,12 @@ def draw_text_labels(todolen):
     textcolor = (0, 0, 0)
     backgroundcolor = (128,128,128)
 
+    # FIXME: should cache surfaces that are used repeatedly
     text_surface = font.render("Quit", True, textcolor, backgroundcolor)
     text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+6,text_surface.get_size()[1]+6))
     text_surface_2.fill(backgroundcolor)
     text_surface_2.blit(text_surface, dest=(3,3))
+    clickables['text_hieght'] = text_surface.get_size()[1]+10
     topleft = (10,10)
     screen.blit(text_surface_2, dest=topleft)
     right_edge = text_surface_2.get_size()[0] + 10
@@ -289,14 +294,81 @@ def draw_text_labels(todolen):
 
     return clickboxes
 
-# convert mouse coordinates to calculation coordinates
 def mouse_to_sim(coord, clickboxes):
+    """
+    Convert mouse coordinates to calculation coordinates.
+    """
+
     for box in clickboxes:
         if box(coord):
             return None
     simx = coordmin_x + coordrange_x * coord[0]/window_x
     simy = coordmin_y + coordrange_y * coord[1]/window_y
     return simx,simy
+
+def coord_to_sector_idx(x,y):
+    """
+    Given an x,y determine what sector it lands in, return the index of that sector.
+    Return None if the coord is out of bounds.
+    """
+    if x < 0 or x >= window_x or y < 0 or y >= window_y:
+        return None
+    x2 = x // sector_size
+    y2 = y // sector_size
+    x_sector_len = (window_y + sector_size - 1) // sector_size
+    return x2 * x_sector_len + y2
+
+def reconsider_todo(todo, drag_px, drag_py):
+    """
+    Copy-paste areas of the screen that can be re-used, determine what sectors need to be processed.
+    """
+    
+    print("Before drag there are %d sectors todo." % len(todo))
+
+    screen.blit(screen,(drag_px,drag_py))  # positive values are movement to right and down
+    if drag_px:
+        black = pygame.surface.Surface((abs(drag_px),window_y))
+        black.fill((0,0,0))
+        if drag_px > 0:
+            screen.blit(black, dest=(0,0))
+        else:
+            screen.blit(black, dest=(window_x-abs(drag_px),0))
+    if drag_py:
+        black = pygame.surface.Surface((window_x,abs(drag_py)))
+        black.fill((0,0,0))
+        if drag_py > 0:
+            screen.blit(black, dest=(0,0))
+        else:
+            screen.blit(black, dest=(0,window_y-abs(drag_py)))
+    pygame.display.flip()
+    newtodo = set()
+    idx = 0
+    for x in range(0, window_x, sector_size):
+        for y in range(0, window_y, sector_size):
+            if y <= clickables['text_hieght'] + drag_py:
+                newtodo.add(idx)      # refresh anything behind the text area
+            if (drag_px > 0 and x <= drag_px) or (drag_px < 0 and x+sector_size > window_x-abs(drag_px)):
+                newtodo.add(idx)      # refresh left and right
+            if (drag_py > 0 and y <= drag_py) or (drag_py < 0 and y+sector_size > window_y-abs(drag_py)):
+                newtodo.add(idx)      # refresh top and bottom
+            idx += 1
+    for sector_idx in todo:           # see what new sectors the old ones trigger updates on
+        x,y = sectors[sector_idx]
+        x += drag_px
+        y += drag_py
+        newtodo.add(coord_to_sector_idx(x,y))
+        if drag_px % sector_size:
+            newtodo.add(coord_to_sector_idx(x+sector_size,y))
+            if drag_py % sector_size:
+                newtodo.add(coord_to_sector_idx(x+sector_size,y+sector_size))
+        if drag_py % sector_size:
+            newtodo.add(coord_to_sector_idx(x,y+sector_size))
+    newnewtodo = []
+    for idx in sectorindexes:    # get sectors sorted by distance from the center
+        if idx in newtodo:
+            newnewtodo.append(idx)
+    print("After drag there are %d sectors todo." % len(newnewtodo))
+    return newnewtodo
 
 # run until the user asks to quit
 simx,simy = mouse_to_sim((0, window_y // 2), [])    # default zoom target
@@ -343,8 +415,13 @@ while clickables['run']:
                 newcoord = mouse_to_sim(mousecoord, clickboxes)
                 if newcoord:
                     print("Mouse click to set center...")
+                    if not clickables['autozoom']:
+                        drag_px = window_x // 2 - mousecoord[0]
+                        drag_py = window_y // 2 - mousecoord[1]
+                        todo = reconsider_todo(todo,drag_px,drag_py)
+                    else:
+                        todo = []   # we've changed zoom, recalculate all sectors
                     simx,simy = newcoord
-                    todo = []
                     clickables['redraw'] = True
                     coordmin_x = simx - coordrange_x/2
                     coordmin_y = simy - coordrange_y/2
@@ -354,10 +431,7 @@ while clickables['run']:
                 print("Mouse drag...")
                 drag_px = mousecoord[0] - clickables['mousedown'][0]   # positive means dragging right
                 drag_py = mousecoord[1] - clickables['mousedown'][1]   # positive means dragging down
-                screen.blit(screen,(drag_px,drag_py))
-                pygame.display.flip()
-                simx,simy = mouse_to_sim(mousecoord, [])
-                todo = []   # fill with things that need to be redrawn
+                todo = reconsider_todo(todo,drag_px,drag_py)
                 clickables['redraw'] = True
                 coordmin_x -= coordrange_x * drag_px / window_x
                 coordmin_y -= coordrange_y * drag_py / window_y
