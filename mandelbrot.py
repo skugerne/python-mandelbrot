@@ -201,6 +201,9 @@ def text_box(text, textcolor, backgroundcolor):
     return text_surface_2
     
 def blit_text(text_surface, left_edge):
+    """
+    Display a text surface and maintain some related variables.
+    """
     spacing = 10
     topleft = (left_edge+spacing,spacing)
     screen.blit(text_surface, dest=topleft)
@@ -292,7 +295,6 @@ def mouse_to_sim(coord, clickboxes):
     """
     Convert mouse coordinates to calculation coordinates.
     """
-
     for box in clickboxes:
         if box(coord):
             return None
