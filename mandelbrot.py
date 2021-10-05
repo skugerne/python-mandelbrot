@@ -42,7 +42,7 @@ def divide_into_sectors():
 
     global sectors, coord_to_sectorindex, sectorindexes, window_x, window_y, coordmin_y, coordrange_y
     sectors = []
-    window_x,window_y = pygame.display.get_window_size()
+    window_x,window_y = pygame.display.get_surface().get_size()
     for x in range(0, window_x, sector_size):
         for y in range(0, window_y, sector_size):
             sectors.append((x,y))
@@ -183,7 +183,7 @@ def draw_button_box(mouse_coord, rect):
        color = (0,255,0)
     else:
        color = (0,0,0)
-    pygame.draw.lines(screen, color, True, ((rect.topleft, rect.bottomleft, rect.bottomright, rect.topright)), width=2)
+    pygame.draw.lines(screen, color, True, ((rect.topleft, rect.bottomleft, rect.bottomright, rect.topright)))
 
 def text_box(text, textcolor, backgroundcolor):
     """
