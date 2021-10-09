@@ -1,16 +1,41 @@
 from cffi import FFI
 from time import time, sleep
-import pygame
+from queue import Queue
+import pygame, threading
 
 max_recursion = 4096   # 1000 can run out before floating point precision does
-coordmin_x = -2.00
-coordmax_x = 0.47
-coordrange_x = coordmax_x - coordmin_x
-coordrange_x_orig = coordrange_x
-coordmin_y = -1.12
-coordmax_y = 1.12
-coordrange_y = coordmax_y - coordmin_y
-sector_size = 20    # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
+sector_size = 20       # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
+todo_queue = Queue()   # WorkUnit objects to process
+done_queue = Queue()   # WorkUnit objects that are done
+drawing_params = []
+
+class DrawingParams():
+    def __init__(self, coordmin_x=None, coordmin_y=None, coordrange_x=None, coordrange_y=None, palette_idx=None):
+        if coordmin_x == None:   self.coordmin_x = drawing_params[-1].coordmin_x
+        else:                    self.coordmin_x = coordmin_x
+        if coordmin_y == None:   self.coordmin_y = drawing_params[-1].coordmin_y
+        else:                    self.coordmin_y = coordmin_y
+        if coordrange_x == None: self.coordrange_x = drawing_params[-1].coordrange_x
+        else:                    self.coordrange_x = coordrange_x
+        if coordrange_y == None: self.coordrange_y = drawing_params[-1].coordrange_y
+        else:                    self.coordrange_y = coordrange_y
+        if palette_idx == None:  self.palette_idx = drawing_params[-1].palette_idx
+        else:                    self.palette_idx = palette_idx
+
+# configure the initial view
+drawing_params.append(DrawingParams(
+    coordmin_x =   -2.00,
+    coordmin_y =   -1.12,
+    coordrange_x = 2.47,
+    coordrange_y = 2.24,
+    palette_idx =  0
+))
+
+class WorkUnit():
+    def __init__(self, sector_idx, todo_id):
+        self.sector_idx = sector_idx  # used to decide what should be calculated (along with drawing parameters)
+        self.todo_idx = todo_idx      # used to verify continued validity of work (and to look up drawing parameters)
+        self.data = None              # store binary pixel data of result here
 
 def zap(x):
     return ((x//4)%256,x//2%128,x%256)
@@ -40,7 +65,7 @@ def divide_into_sectors():
     Divide the screen / coordinate system into sectors for processing, update Y-coordinate scaling info based on X.
     """
 
-    global sectors, coord_to_sectorindex, sectorindexes, window_x, window_y, coordmin_y, coordrange_y
+    global sectors, sectorindexes, window_x, window_y
     sectors = []
     window_x,window_y = pygame.display.get_surface().get_size()
     for x in range(0, window_x, sector_size):
@@ -54,12 +79,12 @@ def divide_into_sectors():
     # we draw sectors that are closest to the screen center first
     # this contains a list of indexes, sorted with highest priority first
     sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumerate(sectors)], reverse=True)]
-    #coord_to_sectorindex = dict((coord,idx) for idx,coord in enumerate(sectors))
 
     # keep the Y coordinate centered the same, and keep the coordinate ratio right
-    coord_y = coordmin_y + coordrange_y/2
-    coordrange_y = coordrange_x * window_y / window_x
-    coordmin_y = coord_y - coordrange_y/2
+    drpa = drawing_params[-1]
+    coord_y = drpa.coordmin_y + drpa.coordrange_y/2
+    drpa.coordrange_y = drpa.coordrange_x * window_y / window_x
+    drpa.coordmin_y = coord_y - drpa.coordrange_y/2
 
 def setup_screen(fullscreen):
     """
@@ -78,7 +103,7 @@ def setup_screen(fullscreen):
         screen = pygame.display.set_mode((window_x,window_y), pygame.FULLSCREEN)
     else:
         window_x = 800      # should fit on any screen
-        window_y = int(round(window_x * coordrange_y / coordrange_x))
+        window_y = int(round(window_x * drawing_params[-1].coordrange_y / drawing_params[-1].coordrange_x))
         print("Window: %d x %d." % (window_x,window_y))
         screen = pygame.display.set_mode((window_x,window_y), pygame.RESIZABLE)
     divide_into_sectors()
@@ -168,12 +193,11 @@ clickables = {
     'autozoom': True,
     'maxzoomed': False,
     'minzoomed': False,
-    'palette': 0,
     'redraw': True,
     'mousedown': None,
     'text_hieght': 0
 }
-lib.set_palette(palettes[clickables['palette']], len(palettes[clickables['palette']])//3)
+lib.set_palette(palettes[drawing_params[-1].palette_idx], len(palettes[drawing_params[-1].palette_idx])//3)   # point C at some binary stuff
 
 def draw_button_box(mouse_coord, rect):
     """
@@ -246,7 +270,7 @@ def draw_text_labels(todolen):
     clickboxes.append(toggle_fullscreen)
     draw_button_box(mouse_coord, fullscreen_rect)
 
-    zoom = coordrange_x_orig / coordrange_x
+    zoom = drawing_params[0].coordrange_x / drawing_params[-1].coordrange_x
     if zoom > 5*1000*1000*1000*1000:    # approximate limit, visual errors apparent starting around here
         clickables['maxzoomed'] = True
     if zoom < 10000:
@@ -278,9 +302,10 @@ def draw_text_labels(todolen):
     def switch_colors(coord):
         if not switch_colors_rect.collidepoint(coord): return False
         clickables['redraw'] = True
-        clickables['palette'] += 1
-        if clickables['palette'] >= len(palettes): clickables['palette'] = 0
-        lib.set_palette(palettes[clickables['palette']], len(palettes[clickables['palette']])//3)
+        palette_idx = drawing_params[-1].palette_idx + 1
+        if palette_idx >= len(palettes): palette_idx = 0
+        drawing_params.append(DrawingParams(palette_idx=palette_idx))
+        lib.set_palette(palettes[drawing_params[-1].palette_idx], len(palettes[drawing_params[-1].palette_idx])//3)   # point C at some binary stuff
         return True
     clickboxes.append(switch_colors)
     draw_button_box(mouse_coord, switch_colors_rect)
@@ -298,8 +323,9 @@ def mouse_to_sim(coord, clickboxes):
     for box in clickboxes:
         if box(coord):
             return None
-    simx = coordmin_x + coordrange_x * coord[0]/window_x
-    simy = coordmin_y + coordrange_y * coord[1]/window_y
+    drpa = drawing_params[-1]
+    simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/window_x
+    simy = drpa.coordmin_y + drpa.coordrange_y * coord[1]/window_y
     return simx,simy
 
 def coord_to_sector_idx(x,y):
@@ -379,9 +405,10 @@ while clickables['run']:
     if todo and ((not sleepstart) or time() - sleepstart > 1):
         sleepstart = None
         sector_idx = todo.pop()
-        start_coord_x = coordmin_x + (coordrange_x * sectors[sector_idx][0])/window_x
-        start_coord_y = coordmin_y + (coordrange_y * sectors[sector_idx][1])/window_y
-        lib.compute_sector(rawdata, start_coord_x, start_coord_y, coordrange_x/window_x, coordrange_y/window_y)
+        drpa = drawing_params[-1]
+        start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sectors[sector_idx][0])/window_x
+        start_coord_y = drpa.coordmin_y + (drpa.coordrange_y * sectors[sector_idx][1])/window_y
+        lib.compute_sector(rawdata, start_coord_x, start_coord_y, drpa.coordrange_x/window_x, drpa.coordrange_y/window_y)
         surface = pygame.image.fromstring(rawdata, (sector_size,sector_size), "RGB")
         screen.blit(surface,sectors[sector_idx])
 
@@ -419,8 +446,10 @@ while clickables['run']:
                         todo = []   # we've changed zoom, recalculate all sectors
                     simx,simy = newcoord
                     clickables['redraw'] = True
-                    coordmin_x = simx - coordrange_x/2
-                    coordmin_y = simy - coordrange_y/2
+                    drawing_params.append(DrawingParams(
+                        coordmin_x = simx - drawing_params[-1].coordrange_x/2,
+                        coordmin_y = simy - drawing_params[-1].coordrange_y/2
+                    ))
                 else:
                     print("Mouse click on button...")
             else:
@@ -429,8 +458,11 @@ while clickables['run']:
                 drag_py = mousecoord[1] - clickables['mousedown'][1]   # positive means dragging down
                 todo = reconsider_todo(todo,drag_px,drag_py)
                 clickables['redraw'] = True
-                coordmin_x -= coordrange_x * drag_px / window_x
-                coordmin_y -= coordrange_y * drag_py / window_y
+                drpa = drawing_params[-1]
+                drawing_params.append(DrawingParams(
+                    coordmin_x = drpa.coordmin_x - drpa.coordrange_x * drag_px / window_x,
+                    coordmin_y = drpa.coordmin_y - drpa.coordrange_y * drag_py / window_y
+                ))
             clickables['mousedown'] = None
         elif event.type == pygame.VIDEORESIZE:
             print("Window resize/sizechanged event...")
@@ -441,10 +473,13 @@ while clickables['run']:
     # handle autozoom
     if clickables['autozoom'] and (not todo) and (not clickables['maxzoomed']):
         print("Autozoom...")
-        coordmin_x += coordrange_x * 0.05
-        coordmin_y += coordrange_y * 0.05
-        coordrange_x *= 0.9
-        coordrange_y *= 0.9
+        drpa = drawing_params[-1]
+        drawing_params.append(DrawingParams(
+            coordmin_x   = drpa.coordmin_x + drpa.coordrange_x * 0.05,
+            coordmin_y   = drpa.coordmin_y + drpa.coordrange_y * 0.05,
+            coordrange_x = drpa.coordrange_x * 0.9,
+            coordrange_y = drpa.coordrange_y * 0.9
+        ))
         clickables['redraw'] = True
 
 pygame.quit()
