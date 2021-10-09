@@ -10,25 +10,33 @@ done_queue = Queue()   # WorkUnit objects that are done
 drawing_params = []
 
 class DrawingParams():
-    def __init__(self, coordmin_x=None, coordmin_y=None, coordrange_x=None, coordrange_y=None, palette_idx=None):
-        if coordmin_x == None:   self.coordmin_x = drawing_params[-1].coordmin_x
-        else:                    self.coordmin_x = coordmin_x
-        if coordmin_y == None:   self.coordmin_y = drawing_params[-1].coordmin_y
-        else:                    self.coordmin_y = coordmin_y
+    def __init__(self, coord_x=None, coord_y=None, coordrange_x=None, palette_idx=None):
+        if coord_x == None:      self.coord_x = drawing_params[-1].coord_x
+        else:                    self.coord_x = coord_x
+        if coord_y == None:      self.coord_y = drawing_params[-1].coord_y
+        else:                    self.coord_y = coord_y
         if coordrange_x == None: self.coordrange_x = drawing_params[-1].coordrange_x
         else:                    self.coordrange_x = coordrange_x
-        if coordrange_y == None: self.coordrange_y = drawing_params[-1].coordrange_y
-        else:                    self.coordrange_y = coordrange_y
         if palette_idx == None:  self.palette_idx = drawing_params[-1].palette_idx
         else:                    self.palette_idx = palette_idx
+        self.coordmin_x = self.coord_x - self.coordrange_x/2
+        self.coordmax_x = self.coord_x + self.coordrange_x/2
+
+    def coordrange_y(self):
+        return self.coordrange_x * window_y / window_x      # based on the screen res at the moment the question is asked
+
+    def coordmin_y(self):
+        return self.coord_y - self.coordrange_y()/2
+
+    def coordmax_y(self):
+        return self.coord_y + self.coordrange_y()/2
 
 # configure the initial view
 drawing_params.append(DrawingParams(
-    coordmin_x =   -2.00,
-    coordmin_y =   -1.12,
+    coord_x      = (0.47 - 2.00)/2,
+    coord_y      = 0,
     coordrange_x = 2.47,
-    coordrange_y = 2.24,
-    palette_idx =  0
+    palette_idx  = 0
 ))
 
 class WorkUnit():
@@ -80,12 +88,6 @@ def divide_into_sectors():
     # this contains a list of indexes, sorted with highest priority first
     sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumerate(sectors)], reverse=True)]
 
-    # keep the Y coordinate centered the same, and keep the coordinate ratio right
-    drpa = drawing_params[-1]
-    coord_y = drpa.coordmin_y + drpa.coordrange_y/2
-    drpa.coordrange_y = drpa.coordrange_x * window_y / window_x
-    drpa.coordmin_y = coord_y - drpa.coordrange_y/2
-
 def setup_screen(fullscreen):
     """
     Enter or leave full screen mode.
@@ -102,8 +104,8 @@ def setup_screen(fullscreen):
         print("Fullscreen: %d x %d." % (window_x,window_y))
         screen = pygame.display.set_mode((window_x,window_y), pygame.FULLSCREEN)
     else:
-        window_x = 800      # should fit on any screen
-        window_y = int(round(window_x * drawing_params[-1].coordrange_y / drawing_params[-1].coordrange_x))
+        window_x = 800                                  # should fit on any screen
+        window_y = int(round(window_x * 2.24 / 2.47))   # classic aspect ratio
         print("Window: %d x %d." % (window_x,window_y))
         screen = pygame.display.set_mode((window_x,window_y), pygame.RESIZABLE)
     divide_into_sectors()
@@ -150,7 +152,7 @@ void colorize(unsigned char* data, int pixel_idx, int iterations){
     }
 }
 
-void compute_sector(unsigned char* data, double start_coord_x, double start_coord_y, double step_x, double step_y) {
+void compute_sector(unsigned char* data, double start_coord_x, double start_coord_y, double coord_step) {
     double coord_x = start_coord_x;
     double coord_y;
     for(int x=0; x<"""+str(sector_size)+"""; ++x){
@@ -161,9 +163,9 @@ void compute_sector(unsigned char* data, double start_coord_x, double start_coor
                 (x + y*"""+str(sector_size)+"""),
                 mandlebrot(coord_x,coord_y)
             );
-            coord_y += step_y;
+            coord_y += coord_step;
         }
-        coord_x += step_x;
+        coord_x += coord_step;
     }
 }
 """)
@@ -172,7 +174,7 @@ extern unsigned char *palette;          // RGB values for colors, 3 bytes per co
 extern int palette_color_count;         // number of colors in palette
 void set_palette(unsigned char *,int);
 long mandlebrot(double,double);
-void compute_sector(unsigned char *,double,double,double,double);
+void compute_sector(unsigned char *,double,double,double);
 """)
 print("Compile...")
 ffi.compile()
@@ -305,7 +307,7 @@ def draw_text_labels(todolen):
         palette_idx = drawing_params[-1].palette_idx + 1
         if palette_idx >= len(palettes): palette_idx = 0
         drawing_params.append(DrawingParams(palette_idx=palette_idx))
-        lib.set_palette(palettes[drawing_params[-1].palette_idx], len(palettes[drawing_params[-1].palette_idx])//3)   # point C at some binary stuff
+        lib.set_palette(palettes[palette_idx], len(palettes[palette_idx])//3)   # point C at some binary stuff
         return True
     clickboxes.append(switch_colors)
     draw_button_box(mouse_coord, switch_colors_rect)
@@ -325,7 +327,7 @@ def mouse_to_sim(coord, clickboxes):
             return None
     drpa = drawing_params[-1]
     simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/window_x
-    simy = drpa.coordmin_y + drpa.coordrange_y * coord[1]/window_y
+    simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/window_y
     return simx,simy
 
 def coord_to_sector_idx(x,y):
@@ -407,8 +409,8 @@ while clickables['run']:
         sector_idx = todo.pop()
         drpa = drawing_params[-1]
         start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sectors[sector_idx][0])/window_x
-        start_coord_y = drpa.coordmin_y + (drpa.coordrange_y * sectors[sector_idx][1])/window_y
-        lib.compute_sector(rawdata, start_coord_x, start_coord_y, drpa.coordrange_x/window_x, drpa.coordrange_y/window_y)
+        start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sectors[sector_idx][1])/window_y
+        lib.compute_sector(rawdata, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
         surface = pygame.image.fromstring(rawdata, (sector_size,sector_size), "RGB")
         screen.blit(surface,sectors[sector_idx])
 
@@ -446,10 +448,7 @@ while clickables['run']:
                         todo = []   # we've changed zoom, recalculate all sectors
                     simx,simy = newcoord
                     clickables['redraw'] = True
-                    drawing_params.append(DrawingParams(
-                        coordmin_x = simx - drawing_params[-1].coordrange_x/2,
-                        coordmin_y = simy - drawing_params[-1].coordrange_y/2
-                    ))
+                    drawing_params.append(DrawingParams(coord_x = simx, coord_y = simy))
                 else:
                     print("Mouse click on button...")
             else:
@@ -460,8 +459,8 @@ while clickables['run']:
                 clickables['redraw'] = True
                 drpa = drawing_params[-1]
                 drawing_params.append(DrawingParams(
-                    coordmin_x = drpa.coordmin_x - drpa.coordrange_x * drag_px / window_x,
-                    coordmin_y = drpa.coordmin_y - drpa.coordrange_y * drag_py / window_y
+                    coord_x = drpa.coord_x - drpa.coordrange_x * drag_px / window_x,
+                    coord_y = drpa.coord_y - drpa.coordrange_y() * drag_py / window_y
                 ))
             clickables['mousedown'] = None
         elif event.type == pygame.VIDEORESIZE:
@@ -474,12 +473,7 @@ while clickables['run']:
     if clickables['autozoom'] and (not todo) and (not clickables['maxzoomed']):
         print("Autozoom...")
         drpa = drawing_params[-1]
-        drawing_params.append(DrawingParams(
-            coordmin_x   = drpa.coordmin_x + drpa.coordrange_x * 0.05,
-            coordmin_y   = drpa.coordmin_y + drpa.coordrange_y * 0.05,
-            coordrange_x = drpa.coordrange_x * 0.9,
-            coordrange_y = drpa.coordrange_y * 0.9
-        ))
+        drawing_params.append(DrawingParams(coordrange_x = drpa.coordrange_x * 0.9))
         clickables['redraw'] = True
 
 pygame.quit()
