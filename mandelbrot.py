@@ -113,6 +113,8 @@ def setup_screen(fullscreen):
 # do some hacky inline C
 ffi = FFI()
 ffi.set_source("inlinehack", """
+#define SECTOR_SIZE """+str(sector_size)+"""
+#define MAX_RECURSION """+str(max_recursion)+"""
 unsigned char *palette = NULL;       // RGB values for colors, 3 bytes per color
 int palette_color_count = 0;         // number of colors in palette
 
@@ -126,7 +128,7 @@ int mandlebrot(double coord_x, double coord_y) {
     double x = 0.0;
     double y = 0.0;
     int count = 0;
-    while( x*x + y*y <= 4.0 && count < """+str(max_recursion)+""" ){
+    while( x*x + y*y <= 4.0 && count < MAX_RECURSION ){
         x2 = x*x - y*y + coord_x;
         y = 2.0*x*y + coord_y;
         x = x2;
@@ -138,7 +140,7 @@ int mandlebrot(double coord_x, double coord_y) {
 void colorize(unsigned char* data, int pixel_idx, int iterations){
     int pixel_addr = pixel_idx * 3;
     int color_addr;
-    if( iterations == """+str(max_recursion)+""" ){
+    if( iterations == MAX_RECURSION ){
         data[pixel_addr]   = 0;
         data[pixel_addr+1] = 0;
         data[pixel_addr+2] = 0;
@@ -154,18 +156,48 @@ void colorize(unsigned char* data, int pixel_idx, int iterations){
 
 void compute_sector(unsigned char* data, double start_coord_x, double start_coord_y, double coord_step) {
     double coord_x = start_coord_x;
-    double coord_y;
-    for(int x=0; x<"""+str(sector_size)+"""; ++x){
+    double coord_y = start_coord_y;
+    double alt_coord = start_coord_x + (SECTOR_SIZE-1)*coord_step;
+    int blacks = 0;
+    int iterations = 0;
+    for( int i=0; i<SECTOR_SIZE; ++i ){           /* calculate left & right edges */
+        iterations = mandlebrot(coord_x, coord_y);
+        colorize(data, i*SECTOR_SIZE, iterations);
+        if(iterations == MAX_RECURSION) blacks += 1;
+        iterations = mandlebrot(alt_coord, coord_y);
+        colorize(data, i*SECTOR_SIZE+SECTOR_SIZE-1, iterations);
+        if(iterations == MAX_RECURSION) blacks += 1;
+        coord_y += coord_step;
+    }
+    coord_x = start_coord_x;
+    coord_y = start_coord_y;
+    alt_coord = start_coord_y + (SECTOR_SIZE-1)*coord_step;
+    for( int i=1; i<SECTOR_SIZE-1; ++i ){         /* calculate top & bottom edges */
+        coord_x += coord_step;
+        iterations = mandlebrot(coord_x, coord_y);
+        colorize(data, i, iterations);
+        if(iterations == MAX_RECURSION) blacks += 1;
+        iterations = mandlebrot(coord_x, alt_coord);
+        colorize(data, SECTOR_SIZE*(SECTOR_SIZE-1)+i, iterations);
+        if(iterations == MAX_RECURSION) blacks += 1;
+    }
+    if( blacks == 4*SECTOR_SIZE-4 ){              /* check for easy escape, big speedup inside the set */
+        for( int i=0; i<SECTOR_SIZE*SECTOR_SIZE*3; ++i )
+            data[i] = 0;                          /* return all black pixels */
+        return;
+    }
+    coord_x = start_coord_x;
+    for( int x=1; x<SECTOR_SIZE-1; ++x ){         /* fill in the middle */
+        coord_x += coord_step;
         coord_y = start_coord_y;
-        for(int y=0; y<"""+str(sector_size)+"""; ++y){
+        for( int y=1; y<SECTOR_SIZE-1; ++y ){
+            coord_y += coord_step;
             colorize(
                 data,
-                (x + y*"""+str(sector_size)+"""),
+                (x + y*SECTOR_SIZE),
                 mandlebrot(coord_x,coord_y)
             );
-            coord_y += coord_step;
         }
-        coord_x += coord_step;
     }
 }
 """)
@@ -408,11 +440,16 @@ while clickables['run']:
         sleepstart = None
         sector_idx = todo.pop()
         drpa = drawing_params[-1]
-        start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sectors[sector_idx][0])/window_x
-        start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sectors[sector_idx][1])/window_y
-        lib.compute_sector(rawdata, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
-        surface = pygame.image.fromstring(rawdata, (sector_size,sector_size), "RGB")
-        screen.blit(surface,sectors[sector_idx])
+        try:
+            sector_x,sector_y = sectors[sector_idx]
+        except IndexError:
+            logger.warning("Seems that index %d isn't valid." % sector_idx)
+        else:
+            start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
+            start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sector_y)/window_y
+            lib.compute_sector(rawdata, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
+            surface = pygame.image.fromstring(rawdata, (sector_size,sector_size), "RGB")
+            screen.blit(surface,sectors[sector_idx])
 
         # pause to display complete result a moment
         if not todo:
