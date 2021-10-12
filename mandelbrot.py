@@ -280,7 +280,7 @@ def draw_text_labels(todolen):
     textcolor = (0, 0, 0)
     backgroundcolor = (128,128,128)
 
-    text_surface = text_box("Quit", textcolor, backgroundcolor)
+    text_surface = text_box("quit", (32,32,255), backgroundcolor)
     right_edge, quit_rect = blit_text(text_surface, 0)
     def quit_btn(coord):
         if not quit_rect.collidepoint(coord): return False
@@ -290,9 +290,9 @@ def draw_text_labels(todolen):
     draw_button_box(mouse_coord, quit_rect)
 
     if clickables['fullscreen']:
-        text = 'Windowed'
+        text = 'windowed'
     else:
-        text = 'Fullscreen'
+        text = 'fullscreen'
     text_surface = text_box(text, textcolor, backgroundcolor)
     right_edge, fullscreen_rect = blit_text(text_surface, right_edge)
     def toggle_fullscreen(coord):
@@ -308,30 +308,34 @@ def draw_text_labels(todolen):
     if zoom > 5*1000*1000*1000*1000:    # approximate limit, visual errors apparent starting around here
         clickables['maxzoomed'] = True
     if zoom < 10000:
-        text = 'Zoom: %0.01f X' % zoom
+        text = 'zoom: %0.01f X' % zoom
     else:
-        text = 'Zoom: {:.1E} X'.format(zoom)
+        text = 'zoom: {:.1E} X'.format(zoom)
     text_surface = text_box(text, textcolor, backgroundcolor)
     right_edge, _ = blit_text(text_surface, right_edge)
 
-    if clickables['autozoom']:
-        text = 'Stop zooming'
-    else:
-        text = 'Start zooming'
-    text_surface = text_box(text, textcolor, backgroundcolor)
-    right_edge, autozoom_rect = blit_text(text_surface, right_edge)
-    def toggle_autozoom(coord):
-        if not autozoom_rect.collidepoint(coord): return False
-        clickables['autozoom'] = not clickables['autozoom']
-        return True
-    clickboxes.append(toggle_autozoom)
-    draw_button_box(mouse_coord, autozoom_rect)
+    # draw a count for how many items there are in history
+    text_surface = text_box('redraw %d' % len(drawing_params), textcolor, backgroundcolor)
+    right_edge, _ = blit_text(text_surface, right_edge)
 
-    if clickables['maxzoomed']:
-        text_surface = text_box('Max floating point precision', (255, 0, 0), backgroundcolor)
+    if not clickables['maxzoomed']:
+        if clickables['autozoom']:
+            text = 'stop zooming'
+        else:
+            text = 'start zooming'
+        text_surface = text_box(text, textcolor, backgroundcolor)
+        right_edge, autozoom_rect = blit_text(text_surface, right_edge)
+        def toggle_autozoom(coord):
+            if not autozoom_rect.collidepoint(coord): return False
+            clickables['autozoom'] = not clickables['autozoom']
+            return True
+        clickboxes.append(toggle_autozoom)
+        draw_button_box(mouse_coord, autozoom_rect)
+    else:
+        text_surface = text_box('hardware limit', (255, 0, 0), backgroundcolor)
         right_edge, _ = blit_text(text_surface, right_edge)
 
-    text_surface = text_box("Switch colors", textcolor, backgroundcolor)
+    text_surface = text_box('switch colors', textcolor, backgroundcolor)
     right_edge, switch_colors_rect = blit_text(text_surface, right_edge)
     def switch_colors(coord):
         if not switch_colors_rect.collidepoint(coord): return False
