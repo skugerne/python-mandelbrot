@@ -1,12 +1,13 @@
 from cffi import FFI
 from time import time, sleep
-from queue import Queue
-import pygame, threading
+from queue import SimpleQueue, Empty
+from multiprocessing import cpu_count
+import pygame, threading, traceback
 
-max_recursion = 4096   # 1000 can run out before floating point precision does
-sector_size = 20       # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
-todo_queue = Queue()   # WorkUnit objects to process
-done_queue = Queue()   # WorkUnit objects that are done
+max_recursion = 4096         # 1000 can run out before floating point precision does
+sector_size = 20             # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
+todo_queue = SimpleQueue()   # WorkUnit objects to process
+done_queue = SimpleQueue()   # WorkUnit objects that are done
 drawing_params = []
 
 class DrawingParams():
@@ -40,10 +41,10 @@ drawing_params.append(DrawingParams(
 ))
 
 class WorkUnit():
-    def __init__(self, sector_idx, todo_id):
-        self.sector_idx = sector_idx  # used to decide what should be calculated (along with drawing parameters)
-        self.todo_idx = todo_idx      # used to verify continued validity of work (and to look up drawing parameters)
-        self.data = None              # store binary pixel data of result here
+    def __init__(self, sector_idx, history_idx):
+        self.sector_idx = sector_idx                     # used to decide what should be calculated (along with drawing parameters)
+        self.history_idx = history_idx                   # used to verify continued validity of work (and to look up drawing parameters)
+        self.data = b"0" * (sector_size*sector_size*3)   # store binary pixel data of result here, then replace with a Pygame Surface
 
 def zap(x):
     return ((x//4)%256,x//2%128,x%256)
@@ -382,7 +383,7 @@ def reconsider_todo(todo, drag_px, drag_py):
     """
     Copy-paste areas of the screen that can be re-used, determine what sectors need to be processed.
     """
-    
+
     print("Before drag there are %d sectors todo." % len(todo))
 
     screen.blit(screen,(drag_px,drag_py))  # positive values are movement to right and down
@@ -430,37 +431,85 @@ def reconsider_todo(todo, drag_px, drag_py):
     print("After drag there are %d sectors todo." % len(newnewtodo))
     return newnewtodo
 
+class Worker():
+    """
+    A class to run in a background thread in which tiles are rendered.
+    """
+    def __init__(self):
+        self.t = None
+
+    def inner_work(self):
+        """
+        The entry point for the thread.
+        """
+        while clickables['run']:
+            try:
+                workunit = todo_queue.get(timeout=1.0)             # obtain a WorkUnit or get an exception
+                drpa = drawing_params[workunit.history_idx]        # local copy of the relevant drawing params
+                if len(drawing_params) != workunit.history_idx+1:  # ensure our drawing params are the most recent
+                    continue                                       # do nothing with obsolete WorkUnit objects
+                try:
+                    sector_x,sector_y = sectors[workunit.sector_idx]
+                except IndexError:
+                    print("Seems that index %d isn't valid." % sector_idx)
+                else:
+                    start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
+                    start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sector_y)/window_y
+                    lib.compute_sector(workunit.data, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
+                    workunit.data = pygame.image.fromstring(workunit.data, (sector_size,sector_size), "RGB")
+                    done_queue.put(workunit)
+            except Empty:
+                print("Todo queue was empty.")
+            except Exception as err:
+                print("Exception in worker thread.")
+                traceback.print_exc()
+                sleep(0.1)
+
+    def start(self):
+        self.t = threading.Thread(target=self.inner_work)
+        self.t.daemon = True
+        self.t.start()
+
+    def alive(self):
+        return self.t.isAlive()
+
 # run until the user asks to quit
 simx,simy = mouse_to_sim((0, window_y // 2), [])    # default zoom target
 todo = []
 sleepstart = None
-rawdata = b"0" * (sector_size*sector_size*3)
+for _ in range(max(10,cpu_count())):   # spawn up to 10 threads (python does not scale perfectly)
+    w = Worker()
+    w.start()
 while clickables['run']:
+    history_idx = len(drawing_params)-1
+
     if clickables['redraw'] and (not todo):
         print("Redraw all sectors...")
-        todo = sectorindexes[:]   # copy because we will destroy it
+        for sector_idx in sectorindexes[:]:
+            todo_queue.put(WorkUnit(sector_idx,history_idx))
+        todo = set(sectorindexes[:])
 
-    if todo and ((not sleepstart) or time() - sleepstart > 1):
+    if todo and ((not sleepstart) or time() - sleepstart > 0.1):
         sleepstart = None
-        sector_idx = todo.pop()
-        drpa = drawing_params[-1]
         try:
-            sector_x,sector_y = sectors[sector_idx]
-        except IndexError:
-            logger.warning("Seems that index %d isn't valid." % sector_idx)
-        else:
-            start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
-            start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sector_y)/window_y
-            lib.compute_sector(rawdata, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
-            surface = pygame.image.fromstring(rawdata, (sector_size,sector_size), "RGB")
-            screen.blit(surface,sectors[sector_idx])
+            timeout = time() + 1/30
+            while True:
+                workunit = done_queue.get_nowait()
+                if workunit.history_idx != history_idx:
+                    continue
+                todo.remove(workunit.sector_idx)
+                screen.blit(workunit.data,sectors[workunit.sector_idx])
+                if time() >= timeout:
+                    break
+        except Empty:
+            sleep(1/60)
 
         # pause to display complete result a moment
         if not todo:
             clickables['redraw'] = False
             sleepstart = time()
     else:
-        sleep(0.05)    # avoid using CPU for nothing
+        sleep(1/60)    # avoid using CPU for nothing
 
     clickboxes = draw_text_labels(len(todo))
     pygame.display.flip()
