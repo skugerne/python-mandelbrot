@@ -557,8 +557,10 @@ def handle_mouse_button_up(todo, clickboxes):
             coord_x = drpa.coord_x - drpa.coordrange_x * drag_px / window_x,
             coord_y = drpa.coord_y - drpa.coordrange_y() * drag_py / window_y
         ))
+
     clickables['mousedown'] = None
 
+    #logger.info("Return todo len %d from handle_mouse_button_up()." % len(todo))
     return todo
 
 
@@ -598,6 +600,7 @@ def handle_input(todo):
         drawing_params.append(DrawingParams(coordrange_x = drpa.coordrange_x * 0.9))
         clickables['redraw'] = True
 
+    #logger.info("Return todo len %d from handle_input()." % len(todo))
     return todo
 
 
@@ -612,11 +615,17 @@ for _ in range(min(16,cpu_count())):   # spawn up to 16 threads (threads do not 
 while clickables['run']:
     history_idx = len(drawing_params)-1
 
-    if clickables['redraw'] and (not todo):
-        logger.info("Redraw all sectors...")
-        for sector_idx in sectorindexes[:]:
-            todo_queue.put(WorkUnit(sector_idx,history_idx))
-        todo = set(sectorindexes[:])
+    if clickables['redraw']:
+        if todo:
+            logger.debug("Have redraw with todo len %d." % len(todo))
+            for sector_idx in todo:
+                todo_queue.put(WorkUnit(sector_idx,history_idx))
+        else:
+            logger.debug("Redraw all sectors.")
+            for sector_idx in sectorindexes:
+                todo_queue.put(WorkUnit(sector_idx,history_idx))
+            todo = sectorindexes[:]                        # we'll be removing values, so make a copy
+        clickables['redraw'] = False
 
     if todo and ((not sleepstart) or time() - sleepstart > 0.2):
         sleepstart = None
@@ -624,9 +633,15 @@ while clickables['run']:
             timeout = time() + 1/30
             while True:
                 workunit = done_queue.get_nowait()
-                if workunit.history_idx != history_idx:
+                if workunit.history_idx != history_idx:    # result from the wrong zoom level and/or scroll
+                    logger.debug("Got a tile from the wrong history index.")
                     continue
-                todo.remove(workunit.sector_idx)
+                try:
+                    todo.remove(workunit.sector_idx)
+                except (KeyError,ValueError) as err:
+                    logger.debug("Got a tile we were not expecting.")
+                    logger.debug(err,exc_info=True)        # result that we are not expecting, perhaps due to scrolling
+                    continue
                 screen.blit(workunit.data,sectors[workunit.sector_idx])
                 if time() >= timeout:
                     break
@@ -636,9 +651,9 @@ while clickables['run']:
         # pause to display complete result a moment
         if not todo:
             logger.info("Done with image.")
-            clickables['redraw'] = False
             sleepstart = time()
     else:
+        logger.debug("Avoid using CPU.")
         sleep(1/60)    # avoid using CPU for nothing
 
     todo = handle_input(todo)
