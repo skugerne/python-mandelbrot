@@ -1,0 +1,5 @@
+run.log
+*.c
+*.o
+*.so
+*.pyd
