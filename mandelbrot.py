@@ -3,11 +3,31 @@ from time import time, sleep
 from queue import SimpleQueue, Empty
 from multiprocessing import cpu_count
 import pygame, threading, traceback
+import logging
+
+
+
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+logger.addHandler(console_handler)
+
+file_handler = logging.FileHandler('run.log', mode='w', encoding='utf8')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - TH%(thread)d - %(levelname)s - %(message)s','%y%m%d %H:%M:%S'))
+logger.addHandler(file_handler)
+
+
 
 max_recursion = 4096         # 1000 can run out before floating point precision does
 sector_size = 20             # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
 todo_queue = SimpleQueue()   # WorkUnit objects to process
 done_queue = SimpleQueue()   # WorkUnit objects that are done
+
+# we keep a list of drawing parameters, a history
 drawing_params = []
 
 class DrawingParams():
@@ -80,7 +100,7 @@ def divide_into_sectors():
     for x in range(0, window_x, sector_size):
         for y in range(0, window_y, sector_size):
             sectors.append((x,y))
-    print("Have divided window into %d sectors." % len(sectors))
+    logger.info("Have divided window into %d sectors." % len(sectors))
 
     def dist(coord):
         return (coord[0]-(window_x+sector_size)/2)**2 + (coord[1]-(window_y+sector_size)/2)**2
@@ -99,15 +119,15 @@ def setup_screen(fullscreen):
     if fullscreen:
         resolutions = sorted(pygame.display.list_modes(), reverse=True)
         if not resolutions:
-            print("No fullscreen resolutions.")
+            logger.info("No fullscreen resolutions.")
             return
         window_x,window_y = resolutions[0]
-        print("Fullscreen: %d x %d." % (window_x,window_y))
+        logger.info("Fullscreen: %d x %d." % (window_x,window_y))
         screen = pygame.display.set_mode((window_x,window_y), pygame.FULLSCREEN)
     else:
         window_x = 800                                  # should fit on any screen
         window_y = int(round(window_x * 2.24 / 2.47))   # classic aspect ratio
-        print("Window: %d x %d." % (window_x,window_y))
+        logger.info("Window: %d x %d." % (window_x,window_y))
         screen = pygame.display.set_mode((window_x,window_y), pygame.RESIZABLE)
     divide_into_sectors()
 
@@ -209,9 +229,9 @@ void set_palette(unsigned char *,int);
 long mandlebrot(double,double);
 void compute_sector(unsigned char *,double,double,double);
 """)
-print("Compile...")
+logger.info("Compile...")
 ffi.compile()
-print("Import...")
+logger.info("Import...")
 from inlinehack import lib     # import the compiled library
 
 
@@ -222,6 +242,8 @@ setup_screen(False)
 pygame.display.set_caption('Mandelbrot')
 font = pygame.font.Font(pygame.font.get_default_font(), 14)
 textcache = dict()
+
+# a global, containing properties which can be edited and shared between threads
 clickables = {
     'run': True,
     'fullscreen': False,
@@ -232,6 +254,7 @@ clickables = {
     'mousedown': None,
     'text_hieght': 0
 }
+
 lib.set_palette(palettes[drawing_params[-1].palette_idx], len(palettes[drawing_params[-1].palette_idx])//3)   # point C at some binary stuff
 
 def draw_button_box(mouse_coord, rect):
@@ -384,7 +407,7 @@ def reconsider_todo(todo, drag_px, drag_py):
     Copy-paste areas of the screen that can be re-used, determine what sectors need to be processed.
     """
 
-    print("Before drag there are %d sectors todo." % len(todo))
+    logger.info("Before drag there are %d sectors todo." % len(todo))
 
     screen.blit(screen,(drag_px,drag_py))  # positive values are movement to right and down
     if drag_px:
@@ -428,7 +451,7 @@ def reconsider_todo(todo, drag_px, drag_py):
     for idx in sectorindexes:    # get these sectors sorted by distance from the center
         if idx in newtodo:
             newnewtodo.append(idx)
-    print("After drag there are %d sectors todo." % len(newnewtodo))
+    logger.info("After drag there are %d sectors todo." % len(newnewtodo))
     return newnewtodo
 
 class Worker():
@@ -442,28 +465,34 @@ class Worker():
         """
         The entry point for the thread.
         """
-        while clickables['run']:
-            try:
-                workunit = todo_queue.get(timeout=1.0)             # obtain a WorkUnit or get an exception
-                drpa = drawing_params[workunit.history_idx]        # local copy of the relevant drawing params
-                if len(drawing_params) != workunit.history_idx+1:  # ensure our drawing params are the most recent
-                    continue                                       # do nothing with obsolete WorkUnit objects
+            
+        logger.info("Thread starting.")
+
+        try:
+            while clickables['run']:
                 try:
-                    sector_x,sector_y = sectors[workunit.sector_idx]
-                except IndexError:
-                    print("Seems that index %d isn't valid." % sector_idx)
-                else:
-                    start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
-                    start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sector_y)/window_y
-                    lib.compute_sector(workunit.data, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
-                    workunit.data = pygame.image.fromstring(workunit.data, (sector_size,sector_size), "RGB")
-                    done_queue.put(workunit)
-            except Empty:
-                print("Todo queue was empty.")
-            except Exception as err:
-                print("Exception in worker thread.")
-                traceback.print_exc()
-                sleep(0.1)
+                    workunit = todo_queue.get(timeout=1.0)             # obtain a WorkUnit or get an exception
+                    drpa = drawing_params[workunit.history_idx]        # local copy of the relevant drawing params
+                    if len(drawing_params) != workunit.history_idx+1:  # ensure our drawing params are the most recent
+                        continue                                       # do nothing with obsolete WorkUnit objects
+                    try:
+                        sector_x,sector_y = sectors[workunit.sector_idx]
+                    except IndexError:
+                        logger.info("Seems that index %d isn't valid." % sector_idx)
+                    else:
+                        start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
+                        start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sector_y)/window_y
+                        lib.compute_sector(workunit.data, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
+                        workunit.data = pygame.image.fromstring(workunit.data, (sector_size,sector_size), "RGB")
+                        done_queue.put(workunit)
+                except Empty:
+                    logger.debug("Todo queue was empty.")
+                    sleep(0.1)
+        except Exception as err:
+            logger.error("Exception in worker thread.")
+            logger.error(err,exc_info=True)
+
+        logger.info("Thread stopping.")
 
     def start(self):
         self.t = threading.Thread(target=self.inner_work)
@@ -477,14 +506,14 @@ class Worker():
 simx,simy = mouse_to_sim((0, window_y // 2), [])    # default zoom target
 todo = []
 sleepstart = None
-for _ in range(max(10,cpu_count())):   # spawn up to 10 threads (python does not scale perfectly)
+for _ in range(min(16,cpu_count())):   # spawn up to 16 threads (threads do not scale forever, you could parallelize better with larger tiles)
     w = Worker()
     w.start()
 while clickables['run']:
     history_idx = len(drawing_params)-1
 
     if clickables['redraw'] and (not todo):
-        print("Redraw all sectors...")
+        logger.info("Redraw all sectors...")
         for sector_idx in sectorindexes[:]:
             todo_queue.put(WorkUnit(sector_idx,history_idx))
         todo = set(sectorindexes[:])
@@ -517,6 +546,13 @@ while clickables['run']:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             clickables['run'] = False
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_SPACE:
+                clickables['autozoom'] = not clickables['autozoom']
+                logger.info("Set autozoom to: %s" % str(clickables['autozoom']))
+            elif event.key in (pygame.K_q,pygame.K_ESCAPE):
+                clickables['run'] = False
+                logger.info("Keyboard quit.")
         elif event.type == pygame.MOUSEBUTTONDOWN:
             clickables['mousedown'] = pygame.mouse.get_pos()
         elif event.type == pygame.MOUSEBUTTONUP:
@@ -529,7 +565,7 @@ while clickables['run']:
             if not dragged:
                 newcoord = mouse_to_sim(mousecoord, clickboxes)
                 if newcoord:
-                    print("Mouse click to set center...")
+                    logger.info("Mouse click to set center...")
                     if not clickables['autozoom']:
                         drag_px = window_x // 2 - mousecoord[0]
                         drag_py = window_y // 2 - mousecoord[1]
@@ -540,9 +576,9 @@ while clickables['run']:
                     clickables['redraw'] = True
                     drawing_params.append(DrawingParams(coord_x = simx, coord_y = simy))
                 else:
-                    print("Mouse click on button...")
+                    logger.info("Mouse click on button...")
             else:
-                print("Mouse drag...")
+                logger.info("Mouse drag...")
                 drag_px = mousecoord[0] - clickables['mousedown'][0]   # positive means dragging right
                 drag_py = mousecoord[1] - clickables['mousedown'][1]   # positive means dragging down
                 todo = reconsider_todo(todo,drag_px,drag_py)
@@ -554,14 +590,14 @@ while clickables['run']:
                 ))
             clickables['mousedown'] = None
         elif event.type == pygame.VIDEORESIZE:
-            print("Window resize/sizechanged event...")
+            logger.info("Window resize/sizechanged event...")
             divide_into_sectors()
             todo = []
             clickables['redraw'] = True
 
     # handle autozoom
     if clickables['autozoom'] and (not todo) and (not clickables['maxzoomed']):
-        print("Autozoom...")
+        logger.info("Autozoom...")
         drpa = drawing_params[-1]
         drawing_params.append(DrawingParams(coordrange_x = drpa.coordrange_x * 0.9))
         clickables['redraw'] = True
