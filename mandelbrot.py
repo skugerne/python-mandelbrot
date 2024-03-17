@@ -118,23 +118,16 @@ class DrawingParams():
         self.coordmax_x   = self.coord_x + self.coordrange_x/2
         self.forgotten    = False                           # when we go back in history, we forget items, but leave them in place (could leave a None or something to save RAM)
 
-    def coordrange_y(self):
-        window_x, window_y = screenstuff.window_dims()
-        return self.coordrange_x * window_y / window_x      # based on the screen res at the moment the question is asked
-
-    def coordmin_y(self):
-        return self.coord_y - self.coordrange_y()/2
-
-    def coordmax_y(self):
-        return self.coord_y + self.coordrange_y()/2
     
-
 
 class WorkUnit():
     def __init__(self, sector_idx, history_idx):
         self.sector_idx = sector_idx                     # used to decide what should be calculated (along with drawing parameters)
         self.history_idx = history_idx                   # used to verify continued validity of work (and to look up drawing parameters)
         self.data = b"0" * (sector_size*sector_size*3)   # store binary pixel data of result here, then replace with a Pygame Surface
+
+    def __hash__(self):
+        return hash((self.sector_idx,self.history_idx))
 
 
 
@@ -147,6 +140,10 @@ class ScreenSectors():
         self.setup_screen(False)
 
     def refresh(self):
+        """
+        Whenever a screen is resized (dragged out, or fullscreen change), we recalculate how many sectors/tiles there are.
+        """
+
         self.window_x, self.window_y = pygame.display.get_surface().get_size()
 
         self.sectors = []
@@ -160,7 +157,7 @@ class ScreenSectors():
 
         # we draw sectors that are closest to the screen center first
         # this contains a list of indexes, sorted with highest priority first
-        self.sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumerate(self.sectors)], reverse=True)]
+        self.sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumerate(self.sectors)], reverse=False)]
 
     def setup_screen(self, fullscreen):
         """
@@ -183,10 +180,25 @@ class ScreenSectors():
         self.refresh()
 
     def display_tile(self,workunit):
+        """
+        Show the image for a tile ("sector").
+        """
         self.screen.blit(workunit.data, self.sectors[workunit.sector_idx])
 
     def window_dims(self):
         return self.window_x, self.window_y
+
+    def coordrange_y(self, drpa):
+        """
+        Give the displayed coordinate range in the Y direction (depends on screen res and a DrawingParams object).
+        """
+        return drpa.coordrange_x * self.window_y / self.window_x
+
+    def coordmin_y(self, drpa):
+        """
+        Give the smallest displayed Y coordinate (depends on screen res and a DrawingParams object).
+        """
+        return drpa.coord_y - self.coordrange_y(drpa)/2
 
 
 
@@ -371,7 +383,7 @@ class Worker():
                     else:
                         window_x, window_y = screenstuff.window_dims()
                         start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
-                        start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sector_y)/window_y
+                        start_coord_y = screenstuff.coordmin_y(drpa) + (screenstuff.coordrange_y(drpa) * sector_y)/window_y
                         lib.compute_sector(workunit.data, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
                         workunit.data = pygame.image.fromstring(workunit.data, (sector_size,sector_size), "RGB")
                         done_queue.put(workunit)
@@ -536,7 +548,7 @@ def mouse_to_sim(coord, clickboxes=None):
                 return None
     drpa = drawing_params.last()
     simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/screenstuff.window_x
-    simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/screenstuff.window_y
+    simy = screenstuff.coordmin_y(drpa) + screenstuff.coordrange_y(drpa) * coord[1]/screenstuff.window_y
     return simx,simy
 
 
@@ -561,7 +573,6 @@ def reconsider_todo(todo, drag_px, drag_py):
     Copy-paste areas of the screen that can be re-used, determine what sectors need to be processed.
     """
 
-    logger.info("Mouse drag.")
     logger.debug("Before drag there are %d sectors to do." % len(todo))
 
     window_x, window_y = screenstuff.window_dims()
@@ -649,7 +660,7 @@ def handle_mouse_button_up(todo, clickboxes):
         drpa = drawing_params.last()
         drawing_params.add(
             coord_x = drpa.coord_x - drpa.coordrange_x * drag_px / window_x,
-            coord_y = drpa.coord_y - drpa.coordrange_y() * drag_py / window_y
+            coord_y = drpa.coord_y - screenstuff.coordrange_y(drpa) * drag_py / window_y
         )
 
     clickables['mousedown'] = None
