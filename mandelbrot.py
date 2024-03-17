@@ -28,6 +28,8 @@ sector_size = 40             # just about any modern screen res seems to be divi
 todo_queue = SimpleQueue()   # WorkUnit objects to process
 done_queue = SimpleQueue()   # WorkUnit objects that are done
 
+
+
 class DrawingParamsHistory():
     """
     A class to track history of what we have drawn, enabling going backwards.
@@ -104,6 +106,8 @@ class DrawingParamsHistory():
             # return that
             return self.last()
 
+
+
 class DrawingParams():
     def __init__(self, coord_x, coord_y, coordrange_x, palette_idx):
         self.coord_x      = coord_x
@@ -115,6 +119,7 @@ class DrawingParams():
         self.forgotten    = False                           # when we go back in history, we forget items, but leave them in place (could leave a None or something to save RAM)
 
     def coordrange_y(self):
+        window_x, window_y = screenstuff.window_dims()
         return self.coordrange_x * window_y / window_x      # based on the screen res at the moment the question is asked
 
     def coordmin_y(self):
@@ -123,7 +128,7 @@ class DrawingParams():
     def coordmax_y(self):
         return self.coord_y + self.coordrange_y()/2
     
-drawing_params = DrawingParamsHistory()
+
 
 class WorkUnit():
     def __init__(self, sector_idx, history_idx):
@@ -131,70 +136,59 @@ class WorkUnit():
         self.history_idx = history_idx                   # used to verify continued validity of work (and to look up drawing parameters)
         self.data = b"0" * (sector_size*sector_size*3)   # store binary pixel data of result here, then replace with a Pygame Surface
 
-def zap(x):
-    return ((x//4)%256,x//2%128,x%256)
 
-def edge(x):
-    if x < max_recursion-255: return (0,0,0)
-    return (x-(max_recursion-255),x-(max_recursion-255),x-(max_recursion-255))
 
-def tobytes(x):
-    data = bytearray(len(x)*3)
-    for idx,t in enumerate(x):
-        data[idx*3]   = t[0]
-        data[idx*3+1] = t[1]
-        data[idx*3+2] = t[2]
-    return bytes(data)
-
-palettes = [
-    [zap(x) for x in range(max_recursion)],
-    [(255,0,125),(255,0,255),(125,0,255),(0,0,255),(0,125,255),(0,255,255),(0,255,125),(0,255,0),(125,255,0),(255,255,0),(255,125,0),(255,0,0)],
-    [(255,0,0),(0,255,0),(0,0,255),(255,255,255)],
-    [edge(x) for x in range(max_recursion)]           # mostly to identify cases where we run out of recursion
-]
-palettes = [tobytes(x) for x in palettes]
-
-def divide_into_sectors():
+class ScreenSectors():
     """
-    Divide the screen / coordinate system into sectors for processing, update Y-coordinate scaling info based on X.
+    Divide the screen / coordinate system into sectors for processing.   Handle setup of screen, and switching between windowed and fullscreen.
     """
 
-    global sectors, sectorindexes, window_x, window_y
-    sectors = []
-    window_x,window_y = pygame.display.get_surface().get_size()
-    for x in range(0, window_x, sector_size):
-        for y in range(0, window_y, sector_size):
-            sectors.append((x,y))
-    logger.info("Have divided window into %d sectors." % len(sectors))
+    def __init__(self):
+        self.setup_screen(False)
 
-    def dist(coord):
-        return (coord[0]-(window_x+sector_size)/2)**2 + (coord[1]-(window_y+sector_size)/2)**2
+    def refresh(self):
+        self.window_x, self.window_y = pygame.display.get_surface().get_size()
 
-    # we draw sectors that are closest to the screen center first
-    # this contains a list of indexes, sorted with highest priority first
-    sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumerate(sectors)], reverse=True)]
+        self.sectors = []
+        for x in range(0, self.window_x, sector_size):
+            for y in range(0, self.window_y, sector_size):
+                self.sectors.append((x,y))
+        logger.info("Have divided window into %d sectors." % len(self.sectors))
 
-def setup_screen(fullscreen):
-    """
-    Enter or leave full screen mode.
-    """
+        def dist(coord):
+            return (coord[0]-(self.window_x+sector_size)/2)**2 + (coord[1]-(self.window_y+sector_size)/2)**2
 
-    global screen, window_x, window_y
+        # we draw sectors that are closest to the screen center first
+        # this contains a list of indexes, sorted with highest priority first
+        self.sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumerate(self.sectors)], reverse=True)]
 
-    if fullscreen:
-        resolutions = sorted(pygame.display.list_modes(), reverse=True)
-        if not resolutions:
-            logger.info("No fullscreen resolutions.")
-            return
-        window_x,window_y = resolutions[0]
-        logger.info("Fullscreen: %d x %d." % (window_x,window_y))
-        screen = pygame.display.set_mode((window_x,window_y), pygame.FULLSCREEN)
-    else:
-        window_x = 800                                  # should fit on any screen
-        window_y = int(round(window_x * 2.24 / 2.47))   # classic aspect ratio
-        logger.info("Window: %d x %d." % (window_x,window_y))
-        screen = pygame.display.set_mode((window_x,window_y), pygame.RESIZABLE)
-    divide_into_sectors()
+    def setup_screen(self, fullscreen):
+        """
+        Enter or leave full screen mode.
+        """
+
+        if fullscreen:
+            resolutions = sorted(pygame.display.list_modes(), reverse=True)
+            if not resolutions:
+                logger.info("No fullscreen resolutions.")
+                return
+            wx,wy = resolutions[0]
+            logger.info("Fullscreen: %d x %d." % (wx,wy))
+            self.screen = pygame.display.set_mode((wx,wy), pygame.FULLSCREEN)
+        else:
+            wx = 800                                  # should fit on any screen
+            wy = int(round(wx * 2.24 / 2.47))         # classic aspect ratio
+            logger.info("Window: %d x %d." % (wx,wy))
+            self.screen = pygame.display.set_mode((wx,wy), pygame.RESIZABLE)
+        self.refresh()
+
+    def display_tile(self,workunit):
+        self.screen.blit(workunit.data, self.sectors[workunit.sector_idx])
+
+    def window_dims(self):
+        return self.window_x, self.window_y
+
+
 
 # do some hacky inline C
 ffi = FFI()
@@ -303,7 +297,8 @@ from inlinehack import lib     # import the compiled library
 
 # start up the user interface
 pygame.init()
-setup_screen(False)
+drawing_params = DrawingParamsHistory()
+screenstuff = ScreenSectors()
 pygame.display.set_caption('Mandelbrot')
 font = pygame.font.Font(pygame.font.get_default_font(), 14)
 textcache = dict()
@@ -320,6 +315,29 @@ clickables = {
     'rightmousedown': None,
     'text_hieght': 0
 }
+
+def zap(x):
+    return ((x//4)%256,x//2%128,x%256)
+
+def edge(x):
+    if x < max_recursion-255: return (0,0,0)
+    return (x-(max_recursion-255),x-(max_recursion-255),x-(max_recursion-255))
+
+def tobytes(x):
+    data = bytearray(len(x)*3)
+    for idx,t in enumerate(x):
+        data[idx*3]   = t[0]
+        data[idx*3+1] = t[1]
+        data[idx*3+2] = t[2]
+    return bytes(data)
+
+palettes = [
+    [zap(x) for x in range(max_recursion)],
+    [(255,0,125),(255,0,255),(125,0,255),(0,0,255),(0,125,255),(0,255,255),(0,255,125),(0,255,0),(125,255,0),(255,255,0),(255,125,0),(255,0,0)],
+    [(255,0,0),(0,255,0),(0,0,255),(255,255,255)],
+    [edge(x) for x in range(max_recursion)]           # mostly to identify cases where we run out of recursion
+]
+palettes = [tobytes(x) for x in palettes]
 
 lib.set_palette(palettes[drawing_params.last().palette_idx], len(palettes[drawing_params.last().palette_idx])//3)   # point C at some binary stuff
 
@@ -347,10 +365,11 @@ class Worker():
                     if not drpa:                                       # ensure our drawing params are the most recent
                         continue                                       # do nothing with obsolete WorkUnit objects
                     try:
-                        sector_x,sector_y = sectors[workunit.sector_idx]
+                        sector_x,sector_y = screenstuff.sectors[workunit.sector_idx]
                     except IndexError:
                         logger.info("Seems that index %d isn't valid." % sector_idx)
                     else:
+                        window_x, window_y = screenstuff.window_dims()
                         start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
                         start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sector_y)/window_y
                         lib.compute_sector(workunit.data, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
@@ -383,7 +402,7 @@ def draw_button_box(mouse_coord, rect):
        color = (0,255,0)
     else:
        color = (0,0,0)
-    pygame.draw.lines(screen, color, True, ((rect.topleft, rect.bottomleft, rect.bottomright, rect.topright)))
+    pygame.draw.lines(screenstuff.screen, color, True, ((rect.topleft, rect.bottomleft, rect.bottomright, rect.topright)))
 
 
 
@@ -410,7 +429,7 @@ def blit_text(text_surface, left_edge):
     """
     spacing = 10
     topleft = (left_edge+spacing,spacing)
-    screen.blit(text_surface, dest=topleft)
+    screenstuff.screen.blit(text_surface, dest=topleft)
     right_edge = left_edge + text_surface.get_size()[0] + spacing
     rect = pygame.Rect(topleft,text_surface.get_size())
     clickables['text_hieght'] = max(clickables['text_hieght'], text_surface.get_size()[1] + spacing + 2)
@@ -446,7 +465,7 @@ def draw_text_labels(todolen):
     def toggle_fullscreen(coord):
         if not fullscreen_rect.collidepoint(coord): return False
         clickables['fullscreen'] = not clickables['fullscreen']
-        setup_screen(clickables['fullscreen'])
+        screenstuff.setup_screen(clickables['fullscreen'])
         clickables['redraw'] = True
         return True
     clickboxes.append(toggle_fullscreen)
@@ -499,7 +518,7 @@ def draw_text_labels(todolen):
     clickboxes.append(switch_colors)
     draw_button_box(mouse_coord, switch_colors_rect)
     
-    perc = int(round(100 * todolen / len(sectors)))
+    perc = int(round(100 * todolen / len(screenstuff.sectors)))
     text_surface = text_box('todo: %3d%%' % perc, textcolor, backgroundcolor)
     right_edge, _ = blit_text(text_surface, right_edge)
 
@@ -516,8 +535,8 @@ def mouse_to_sim(coord, clickboxes=None):
             if box(coord):
                 return None
     drpa = drawing_params.last()
-    simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/window_x
-    simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/window_y
+    simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/screenstuff.window_x
+    simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/screenstuff.window_y
     return simx,simy
 
 
@@ -527,6 +546,7 @@ def coord_to_sector_idx(x,y):
     Given an x,y determine what sector it lands in, return the index of that sector.
     Return None if the coord is out of bounds.
     """
+    window_x, window_y = screenstuff.window_dims()
     if x < 0 or x >= window_x or y < 0 or y >= window_y:
         return None
     x2 = x // sector_size
@@ -544,21 +564,23 @@ def reconsider_todo(todo, drag_px, drag_py):
     logger.info("Mouse drag.")
     logger.debug("Before drag there are %d sectors to do." % len(todo))
 
-    screen.blit(screen,(drag_px,drag_py))  # positive values are movement to right and down
+    window_x, window_y = screenstuff.window_dims()
+
+    screenstuff.screen.blit(screenstuff.screen,(drag_px,drag_py))  # positive values are movement to right and down
     if drag_px:
         black = pygame.surface.Surface((abs(drag_px),window_y))
         black.fill((0,0,0))
         if drag_px > 0:
-            screen.blit(black, dest=(0,0))
+            screenstuff.screen.blit(black, dest=(0,0))
         else:
-            screen.blit(black, dest=(window_x-abs(drag_px),0))
+            screenstuff.screen.blit(black, dest=(window_x-abs(drag_px),0))
     if drag_py:
         black = pygame.surface.Surface((window_x,abs(drag_py)))
         black.fill((0,0,0))
         if drag_py > 0:
-            screen.blit(black, dest=(0,0))
+            screenstuff.screen.blit(black, dest=(0,0))
         else:
-            screen.blit(black, dest=(0,window_y-abs(drag_py)))
+            screenstuff.screen.blit(black, dest=(0,window_y-abs(drag_py)))
     pygame.display.flip()
     newtodo = set()
     idx = 0
@@ -572,7 +594,7 @@ def reconsider_todo(todo, drag_px, drag_py):
                 newtodo.add(idx)      # refresh top and bottom
             idx += 1
     for sector_idx in todo:           # see what new sectors the old ones trigger updates on
-        x,y = sectors[sector_idx]
+        x,y = screenstuff.sectors[sector_idx]
         x += drag_px
         y += drag_py
         newtodo.add(coord_to_sector_idx(x,y))
@@ -583,7 +605,7 @@ def reconsider_todo(todo, drag_px, drag_py):
         if drag_py % sector_size:
             newtodo.add(coord_to_sector_idx(x,y+sector_size))
     newnewtodo = []
-    for idx in sectorindexes:    # get these sectors sorted by distance from the center
+    for idx in screenstuff.sectorindexes:    # get these sectors sorted by distance from the center
         if idx in newtodo:
             newnewtodo.append(idx)
     logger.debug("After drag there are %d sectors to do." % len(newnewtodo))
@@ -596,6 +618,7 @@ def handle_mouse_button_up(todo, clickboxes):
     Handle mouse button up ("un-click") events.  It might be a button press, zoom center set, or a left-drag ending.
     """
 
+    window_x, window_y = screenstuff.window_dims()
     mousecoord = pygame.mouse.get_pos()
     if clickables['mousedown']:
         d = abs(mousecoord[0]-clickables['mousedown'][0]) + abs(mousecoord[1]-clickables['mousedown'][1])
@@ -717,7 +740,7 @@ def handle_input(todo):
                 todo = handle_right_mouse_button_up(todo)
         elif event.type == pygame.VIDEORESIZE:
             logger.info("Window resize/sizechanged event.")
-            divide_into_sectors()
+            screenstuff.refresh()
             todo = []
             clickables['redraw'] = True
 
@@ -747,9 +770,9 @@ while clickables['run']:
                 todo_queue.put(WorkUnit(sector_idx,history_idx))
         else:
             logger.debug("Redraw all sectors.")
-            for sector_idx in sectorindexes:
+            for sector_idx in screenstuff.sectorindexes:
                 todo_queue.put(WorkUnit(sector_idx,history_idx))
-            todo = sectorindexes[:]                        # we'll be removing values, so make a copy
+            todo = screenstuff.sectorindexes[:]            # we'll be removing values, so make a copy
         clickables['redraw'] = False
 
     if todo and ((not sleepstart) or time() - sleepstart > 0.2):
@@ -767,7 +790,7 @@ while clickables['run']:
                     logger.debug("Got a tile we were not expecting.")
                     logger.debug(err,exc_info=True)        # result that we are not expecting, perhaps due to scrolling
                     continue
-                screen.blit(workunit.data,sectors[workunit.sector_idx])
+                screenstuff.display_tile(workunit)
                 if time() >= timeout:
                     break
         except Empty:
