@@ -317,6 +317,7 @@ clickables = {
     'minzoomed': False,
     'redraw': True,
     'mousedown': None,
+    'rightmousedown': None,
     'text_hieght': 0
 }
 
@@ -506,13 +507,14 @@ def draw_text_labels(todolen):
 
 
 
-def mouse_to_sim(coord, clickboxes):
+def mouse_to_sim(coord, clickboxes=None):
     """
     Convert mouse coordinates to calculation coordinates.
     """
-    for box in clickboxes:
-        if box(coord):
-            return None
+    if clickboxes:
+        for box in clickboxes:     # optionally ignore coords that fall in clickboxes
+            if box(coord):
+                return None
     drpa = drawing_params.last()
     simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/window_x
     simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/window_y
@@ -539,7 +541,8 @@ def reconsider_todo(todo, drag_px, drag_py):
     Copy-paste areas of the screen that can be re-used, determine what sectors need to be processed.
     """
 
-    logger.info("Before drag there are %d sectors todo." % len(todo))
+    logger.info("Mouse drag.")
+    logger.debug("Before drag there are %d sectors to do." % len(todo))
 
     screen.blit(screen,(drag_px,drag_py))  # positive values are movement to right and down
     if drag_px:
@@ -583,14 +586,14 @@ def reconsider_todo(todo, drag_px, drag_py):
     for idx in sectorindexes:    # get these sectors sorted by distance from the center
         if idx in newtodo:
             newnewtodo.append(idx)
-    logger.info("After drag there are %d sectors todo." % len(newnewtodo))
+    logger.debug("After drag there are %d sectors to do." % len(newnewtodo))
     return newnewtodo
     
 
 
 def handle_mouse_button_up(todo, clickboxes):
     """
-    Handle mouse button up ("un-click") events.
+    Handle mouse button up ("un-click") events.  It might be a button press, zoom center set, or a left-drag ending.
     """
 
     mousecoord = pygame.mouse.get_pos()
@@ -628,8 +631,37 @@ def handle_mouse_button_up(todo, clickboxes):
 
     clickables['mousedown'] = None
 
-    #logger.info("Return todo len %d from handle_mouse_button_up()." % len(todo))
     return todo
+
+
+
+def handle_right_mouse_button_up(todo):
+    """
+    Right-click drag will indicate a zoom box.
+    """
+
+    # if we somehow didn't see a mouse down event, then we have nothing to do here
+    if not clickables['rightmousedown']:
+        return todo
+
+    x2,y2 = pygame.mouse.get_pos()
+    x1,y1 = clickables['rightmousedown']
+    
+    # its not a drag unless there was meaningful mouse movement
+    if abs(x1-x2) + abs(y1-y2) < 3:
+        return todo
+    
+    simx1,simy1 = mouse_to_sim((x1,y1))
+    simx2,simy2 = mouse_to_sim((x2,y2))
+
+    drawing_params.add(
+        coord_x      = (simx1 + simx2) / 2,
+        coord_y      = (simy1 + simy2) / 2,
+        coordrange_x = abs(simx1 - simx2)
+    )
+
+    clickables['redraw'] = True
+    return []   # redraw it all
 
 
 
@@ -658,18 +690,31 @@ def handle_input(todo):
                 logger.info("Backwards in history.")
             elif event.key in (pygame.K_MINUS,pygame.K_KP_MINUS):
                 todo = []
-                drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * 10/9)
+                amount = 10/9
+                keys = pygame.key.get_pressed()
+                if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+                    amount = amount ** 5
+                drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * amount)
                 clickables['redraw'] = True
                 logger.info("Zoom out.")
             elif event.key in (pygame.K_PLUS,pygame.K_KP_PLUS):
                 todo = []
-                drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * 9/10)
+                amount = 9/10
+                keys = pygame.key.get_pressed()
+                if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+                    amount = amount ** 5
+                drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * amount)
                 clickables['redraw'] = True
                 logger.info("Zoom in.")
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            clickables['mousedown'] = pygame.mouse.get_pos()
+            if event.button == pygame.BUTTON_LEFT: key = 'mousedown'
+            elif event.button == pygame.BUTTON_RIGHT: key = 'rightmousedown'
+            clickables[key] = pygame.mouse.get_pos()
         elif event.type == pygame.MOUSEBUTTONUP:
-            todo = handle_mouse_button_up(todo,clickboxes)
+            if event.button == pygame.BUTTON_LEFT:
+                todo = handle_mouse_button_up(todo,clickboxes)
+            elif event.button == pygame.BUTTON_RIGHT:
+                todo = handle_right_mouse_button_up(todo)
         elif event.type == pygame.VIDEORESIZE:
             logger.info("Window resize/sizechanged event.")
             divide_into_sectors()
@@ -682,7 +727,6 @@ def handle_input(todo):
         drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * 9/10)
         clickables['redraw'] = True
 
-    #logger.info("Return todo len %d from handle_input()." % len(todo))
     return todo
 
 
