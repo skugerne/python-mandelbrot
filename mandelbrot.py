@@ -22,26 +22,97 @@ logger.addHandler(file_handler)
 
 
 
-max_recursion = 4096         # 1000 can run out before floating point precision does
+max_recursion = 4096   # maybe 2**16-1 eventually?
 sector_size = 20             # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
 todo_queue = SimpleQueue()   # WorkUnit objects to process
 done_queue = SimpleQueue()   # WorkUnit objects that are done
 
-# we keep a list of drawing parameters, a history
-drawing_params = []
+class DrawingParamsHistory():
+    """
+    A class to track history of what we have drawn, enabling going backwards.
+    """
+
+    def __init__(self):
+        self.param_history = [
+            DrawingParams(
+                coord_x      = (0.47 - 2.00)/2,
+                coord_y      = 0,
+                coordrange_x = 2.47,
+                palette_idx  = 0
+            )
+        ]
+        self.current_idx = 0
+        self.current_depth = 1
+        self.lock = threading.RLock()
+
+    def last(self):
+        with self.lock:
+            return self.param_history[self.current_idx]
+    
+    def first(self):
+        return self.param_history[0]
+    
+    def get(self,idx):
+        dparams = self.param_history[idx]
+        if dparams.forgotten: return None
+        return dparams
+    
+    def current_zoom(self):
+        """
+        Return how far we have zoomed in.
+        """
+        with self.lock:
+            return self.param_history[0].coordrange_x / self.param_history[self.current_idx].coordrange_x
+        
+    def add(self, coord_x=None, coord_y=None, coordrange_x=None, palette_idx=None):
+        """
+        Add the specified drawing parameters to the stack.  We always add more, never delete.
+        """
+
+        with self.lock:
+            p = self.last()
+            if coord_x == None:      coord_x = p.coord_x
+            if coord_y == None:      coord_y = p.coord_y
+            if coordrange_x == None: coordrange_x = p.coordrange_x
+            if palette_idx == None:  palette_idx = p.palette_idx
+            d = DrawingParams(coord_x, coord_y, coordrange_x, palette_idx)
+            self.param_history.append(d)
+
+            self.current_idx = len(self.param_history)-1
+            if coordrange_x != p.coordrange_x:
+                self.current_depth += 1
+
+            return d
+    
+    def back(self):
+        """
+        Go to an earlier set of drawing parameters.  We do not remove the one we are abandoning.
+        """
+
+        with self.lock:
+            
+            # disable where we are (as long as its not index 0)
+            if self.current_idx:
+                if not self.param_history[self.current_idx].forgotten:
+                    self.current_depth -= 1
+                    self.param_history[self.current_idx].forgotten = True
+
+            # go backwards to find a not-disabled entry
+            while self.current_idx and self.param_history[self.current_idx].forgotten:
+                self.current_idx -= 1
+
+            # return that
+            return self.last()
 
 class DrawingParams():
-    def __init__(self, coord_x=None, coord_y=None, coordrange_x=None, palette_idx=None):
-        if coord_x == None:      self.coord_x = drawing_params[-1].coord_x
-        else:                    self.coord_x = coord_x
-        if coord_y == None:      self.coord_y = drawing_params[-1].coord_y
-        else:                    self.coord_y = coord_y
-        if coordrange_x == None: self.coordrange_x = drawing_params[-1].coordrange_x
-        else:                    self.coordrange_x = coordrange_x
-        if palette_idx == None:  self.palette_idx = drawing_params[-1].palette_idx
-        else:                    self.palette_idx = palette_idx
-        self.coordmin_x = self.coord_x - self.coordrange_x/2
-        self.coordmax_x = self.coord_x + self.coordrange_x/2
+    def __init__(self, coord_x, coord_y, coordrange_x, palette_idx):
+        self.coord_x      = coord_x
+        self.coord_y      = coord_y
+        self.coordrange_x = coordrange_x
+        self.palette_idx  = palette_idx
+        self.coordmin_x   = self.coord_x - self.coordrange_x/2
+        self.coordmax_x   = self.coord_x + self.coordrange_x/2
+        self.forgotten    = False                           # when we go back in history, we forget items, but leave them in place (could leave a None or something to save RAM)
 
     def coordrange_y(self):
         return self.coordrange_x * window_y / window_x      # based on the screen res at the moment the question is asked
@@ -51,14 +122,8 @@ class DrawingParams():
 
     def coordmax_y(self):
         return self.coord_y + self.coordrange_y()/2
-
-# configure the initial view
-drawing_params.append(DrawingParams(
-    coord_x      = (0.47 - 2.00)/2,
-    coord_y      = 0,
-    coordrange_x = 2.47,
-    palette_idx  = 0
-))
+    
+drawing_params = DrawingParamsHistory()
 
 class WorkUnit():
     def __init__(self, sector_idx, history_idx):
@@ -255,7 +320,7 @@ clickables = {
     'text_hieght': 0
 }
 
-lib.set_palette(palettes[drawing_params[-1].palette_idx], len(palettes[drawing_params[-1].palette_idx])//3)   # point C at some binary stuff
+lib.set_palette(palettes[drawing_params.last().palette_idx], len(palettes[drawing_params.last().palette_idx])//3)   # point C at some binary stuff
 
 
 
@@ -277,8 +342,8 @@ class Worker():
             while clickables['run']:
                 try:
                     workunit = todo_queue.get(timeout=1.0)             # obtain a WorkUnit or get an exception
-                    drpa = drawing_params[workunit.history_idx]        # local copy of the relevant drawing params
-                    if len(drawing_params) != workunit.history_idx+1:  # ensure our drawing params are the most recent
+                    drpa = drawing_params.get(workunit.history_idx)    # local copy of the relevant drawing params
+                    if not drpa:                                       # ensure our drawing params are the most recent
                         continue                                       # do nothing with obsolete WorkUnit objects
                     try:
                         sector_x,sector_y = sectors[workunit.sector_idx]
@@ -386,7 +451,7 @@ def draw_text_labels(todolen):
     clickboxes.append(toggle_fullscreen)
     draw_button_box(mouse_coord, fullscreen_rect)
 
-    zoom = drawing_params[0].coordrange_x / drawing_params[-1].coordrange_x
+    zoom = drawing_params.current_zoom()
     if zoom > 5*1000*1000*1000*1000:    # approximate limit, visual errors apparent starting around here
         clickables['maxzoomed'] = True
     if zoom < 10000:
@@ -397,7 +462,7 @@ def draw_text_labels(todolen):
     right_edge, _ = blit_text(text_surface, right_edge)
 
     # draw a count for how many items there are in history
-    text_surface = text_box('redraw %d' % len(drawing_params), textcolor, backgroundcolor)
+    text_surface = text_box('level %d' % drawing_params.current_depth, textcolor, backgroundcolor)
     right_edge, _ = blit_text(text_surface, right_edge)
 
     if not clickables['maxzoomed']:
@@ -422,9 +487,9 @@ def draw_text_labels(todolen):
     def switch_colors(coord):
         if not switch_colors_rect.collidepoint(coord): return False
         clickables['redraw'] = True
-        palette_idx = drawing_params[-1].palette_idx + 1
+        palette_idx = drawing_params.last().palette_idx + 1
         if palette_idx >= len(palettes): palette_idx = 0
-        drawing_params.append(DrawingParams(palette_idx=palette_idx))
+        drawing_params.add(palette_idx=palette_idx)
         lib.set_palette(palettes[palette_idx], len(palettes[palette_idx])//3)   # point C at some binary stuff
         return True
     clickboxes.append(switch_colors)
@@ -445,7 +510,7 @@ def mouse_to_sim(coord, clickboxes):
     for box in clickboxes:
         if box(coord):
             return None
-    drpa = drawing_params[-1]
+    drpa = drawing_params.last()
     simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/window_x
     simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/window_y
     return simx,simy
@@ -543,7 +608,7 @@ def handle_mouse_button_up(todo, clickboxes):
                 todo = []   # we've changed zoom, recalculate all sectors
             simx,simy = newcoord
             clickables['redraw'] = True
-            drawing_params.append(DrawingParams(coord_x = simx, coord_y = simy))
+            drawing_params.add(coord_x = simx, coord_y = simy)
         else:
             logger.info("Mouse click on button...")
     else:
@@ -552,11 +617,11 @@ def handle_mouse_button_up(todo, clickboxes):
         drag_py = mousecoord[1] - clickables['mousedown'][1]   # positive means dragging down
         todo = reconsider_todo(todo,drag_px,drag_py)
         clickables['redraw'] = True
-        drpa = drawing_params[-1]
-        drawing_params.append(DrawingParams(
+        drpa = drawing_params.last()
+        drawing_params.add(
             coord_x = drpa.coord_x - drpa.coordrange_x * drag_px / window_x,
             coord_y = drpa.coord_y - drpa.coordrange_y() * drag_py / window_y
-        ))
+        )
 
     clickables['mousedown'] = None
 
@@ -583,6 +648,11 @@ def handle_input(todo):
             elif event.key in (pygame.K_q,pygame.K_ESCAPE):
                 clickables['run'] = False
                 logger.info("Keyboard quit.")
+            elif event.key in (pygame.K_MINUS,pygame.K_DELETE,pygame.K_BACKSPACE):
+                drawing_params.back()
+                todo = []
+                clickables['redraw'] = True
+                logger.info("Backwards in history.")
         elif event.type == pygame.MOUSEBUTTONDOWN:
             clickables['mousedown'] = pygame.mouse.get_pos()
         elif event.type == pygame.MOUSEBUTTONUP:
@@ -596,8 +666,8 @@ def handle_input(todo):
     # handle autozoom
     if clickables['autozoom'] and (not todo) and (not clickables['maxzoomed']):
         logger.info("Autozoom...")
-        drpa = drawing_params[-1]
-        drawing_params.append(DrawingParams(coordrange_x = drpa.coordrange_x * 0.9))
+        drpa = drawing_params.last()
+        drawing_params.add(coordrange_x = drpa.coordrange_x * 0.9)
         clickables['redraw'] = True
 
     #logger.info("Return todo len %d from handle_input()." % len(todo))
@@ -606,14 +676,13 @@ def handle_input(todo):
 
 
 # run until the user asks to quit
-simx,simy = mouse_to_sim((0, window_y // 2), [])    # default zoom target
 todo = []
 sleepstart = None
 for _ in range(min(16,cpu_count())):   # spawn up to 16 threads (threads do not scale forever, you could parallelize better with larger tiles)
     w = Worker()
     w.start()
 while clickables['run']:
-    history_idx = len(drawing_params)-1
+    history_idx = drawing_params.current_idx
 
     if clickables['redraw']:
         if todo:
