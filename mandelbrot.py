@@ -1,5 +1,6 @@
 from cffi import FFI
 from time import time, sleep
+from math import log
 from queue import SimpleQueue, Empty
 from multiprocessing import cpu_count
 import pygame, threading, traceback
@@ -22,8 +23,8 @@ logger.addHandler(file_handler)
 
 
 
-max_recursion = 4096   # maybe 2**16-1 eventually?
-sector_size = 20             # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
+max_recursion = 4096         # maybe 2**16-1 eventually?
+sector_size = 40             # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
 todo_queue = SimpleQueue()   # WorkUnit objects to process
 done_queue = SimpleQueue()   # WorkUnit objects that are done
 
@@ -42,7 +43,6 @@ class DrawingParamsHistory():
             )
         ]
         self.current_idx = 0
-        self.current_depth = 1
         self.lock = threading.RLock()
 
     def last(self):
@@ -64,6 +64,12 @@ class DrawingParamsHistory():
         with self.lock:
             return self.param_history[0].coordrange_x / self.param_history[self.current_idx].coordrange_x
         
+    def current_depth(self):
+        """
+        Return about how many "zooms" have been done, assuming a zoom is to 9/10 of current screen.
+        """
+        return int(log(self.current_zoom(),10/9) + 0.5)
+        
     def add(self, coord_x=None, coord_y=None, coordrange_x=None, palette_idx=None):
         """
         Add the specified drawing parameters to the stack.  We always add more, never delete.
@@ -77,11 +83,7 @@ class DrawingParamsHistory():
             if palette_idx == None:  palette_idx = p.palette_idx
             d = DrawingParams(coord_x, coord_y, coordrange_x, palette_idx)
             self.param_history.append(d)
-
             self.current_idx = len(self.param_history)-1
-            if coordrange_x != p.coordrange_x:
-                self.current_depth += 1
-
             return d
     
     def back(self):
@@ -93,9 +95,7 @@ class DrawingParamsHistory():
             
             # disable where we are (as long as its not index 0)
             if self.current_idx:
-                if not self.param_history[self.current_idx].forgotten:
-                    self.current_depth -= 1
-                    self.param_history[self.current_idx].forgotten = True
+                self.param_history[self.current_idx].forgotten = True
 
             # go backwards to find a not-disabled entry
             while self.current_idx and self.param_history[self.current_idx].forgotten:
@@ -454,6 +454,9 @@ def draw_text_labels(todolen):
     zoom = drawing_params.current_zoom()
     if zoom > 5*1000*1000*1000*1000:    # approximate limit, visual errors apparent starting around here
         clickables['maxzoomed'] = True
+        clickables['autozoom'] = False
+    else:
+        clickables['maxzoomed'] = False
     if zoom < 10000:
         text = 'zoom: %0.01f X' % zoom
     else:
@@ -462,7 +465,7 @@ def draw_text_labels(todolen):
     right_edge, _ = blit_text(text_surface, right_edge)
 
     # draw a count for how many items there are in history
-    text_surface = text_box('level %d' % drawing_params.current_depth, textcolor, backgroundcolor)
+    text_surface = text_box('level: %d' % drawing_params.current_depth(), textcolor, backgroundcolor)
     right_edge, _ = blit_text(text_surface, right_edge)
 
     if not clickables['maxzoomed']:
@@ -599,7 +602,7 @@ def handle_mouse_button_up(todo, clickboxes):
     if not dragged:
         newcoord = mouse_to_sim(mousecoord, clickboxes)
         if newcoord:
-            logger.info("Mouse click to set center...")
+            logger.info("Mouse click to set center.")
             if not clickables['autozoom']:
                 drag_px = window_x // 2 - mousecoord[0]
                 drag_py = window_y // 2 - mousecoord[1]
@@ -610,9 +613,9 @@ def handle_mouse_button_up(todo, clickboxes):
             clickables['redraw'] = True
             drawing_params.add(coord_x = simx, coord_y = simy)
         else:
-            logger.info("Mouse click on button...")
+            logger.info("Mouse click on button.")
     else:
-        logger.info("Mouse drag...")
+        logger.info("Mouse drag.")
         drag_px = mousecoord[0] - clickables['mousedown'][0]   # positive means dragging right
         drag_py = mousecoord[1] - clickables['mousedown'][1]   # positive means dragging down
         todo = reconsider_todo(todo,drag_px,drag_py)
@@ -648,26 +651,35 @@ def handle_input(todo):
             elif event.key in (pygame.K_q,pygame.K_ESCAPE):
                 clickables['run'] = False
                 logger.info("Keyboard quit.")
-            elif event.key in (pygame.K_MINUS,pygame.K_DELETE,pygame.K_BACKSPACE):
+            elif event.key in (pygame.K_DELETE,pygame.K_BACKSPACE):
                 drawing_params.back()
                 todo = []
                 clickables['redraw'] = True
                 logger.info("Backwards in history.")
+            elif event.key in (pygame.K_MINUS,pygame.K_KP_MINUS):
+                todo = []
+                drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * 10/9)
+                clickables['redraw'] = True
+                logger.info("Zoom out.")
+            elif event.key in (pygame.K_PLUS,pygame.K_KP_PLUS):
+                todo = []
+                drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * 9/10)
+                clickables['redraw'] = True
+                logger.info("Zoom in.")
         elif event.type == pygame.MOUSEBUTTONDOWN:
             clickables['mousedown'] = pygame.mouse.get_pos()
         elif event.type == pygame.MOUSEBUTTONUP:
             todo = handle_mouse_button_up(todo,clickboxes)
         elif event.type == pygame.VIDEORESIZE:
-            logger.info("Window resize/sizechanged event...")
+            logger.info("Window resize/sizechanged event.")
             divide_into_sectors()
             todo = []
             clickables['redraw'] = True
 
     # handle autozoom
     if clickables['autozoom'] and (not todo) and (not clickables['maxzoomed']):
-        logger.info("Autozoom...")
-        drpa = drawing_params.last()
-        drawing_params.add(coordrange_x = drpa.coordrange_x * 0.9)
+        logger.info("Autozoom.")
+        drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * 9/10)
         clickables['redraw'] = True
 
     #logger.info("Return todo len %d from handle_input()." % len(todo))
