@@ -27,6 +27,27 @@ max_recursion = 4096         # maybe 2**16-1 eventually?
 sector_size = 40             # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
 todo_queue = SimpleQueue()   # WorkUnit objects to process
 done_queue = SimpleQueue()   # WorkUnit objects that are done
+zoom_step = 0.9
+zoom_step_inv = 1 / zoom_step
+
+
+
+def zoom_level_to_screen_w(l):
+    """
+    Given a human-friendly zoom level, determine the coordinate range (as one number) of the screen width.
+    Zoom level 0 is a X-coordinate width of 2.47.
+    """
+    return 2.47 / zoom_step_inv ** l
+
+
+
+def screen_w_to_zoom_level(w):
+    """
+    Given the coordinate range (as one number) of the screen width, return a human-friendly zoom level.
+    Zoom level 0 is a X-coordinate width of 2.47.
+    """
+    ratio = 2.47 / w
+    return int(log(ratio,zoom_step_inv) + 0.5)
 
 
 
@@ -70,7 +91,8 @@ class DrawingParamsHistory():
         """
         Return about how many "zooms" have been done, assuming a zoom is to 9/10 of current screen.
         """
-        return int(log(self.current_zoom(),10/9) + 0.5)
+        with self.lock:
+            return screen_w_to_zoom_level(self.param_history[self.current_idx].coordrange_x)
         
     def add(self, coord_x=None, coord_y=None, coordrange_x=None, palette_idx=None):
         """
@@ -109,10 +131,16 @@ class DrawingParamsHistory():
 
 
 class DrawingParams():
+    """
+    A class to package various drawing parameters at a given moment.
+
+    Note that various Y-axis values are not included, as they depend on display ratio, which can change.
+    """
+
     def __init__(self, coord_x, coord_y, coordrange_x, palette_idx):
         self.coord_x      = coord_x
         self.coord_y      = coord_y
-        self.coordrange_x = coordrange_x
+        self.coordrange_x = zoom_level_to_screen_w(screen_w_to_zoom_level(coordrange_x))
         self.palette_idx  = palette_idx
         self.coordmin_x   = self.coord_x - self.coordrange_x/2
         self.coordmax_x   = self.coord_x + self.coordrange_x/2
@@ -128,6 +156,34 @@ class WorkUnit():
 
     def __hash__(self):
         return hash((self.sector_idx,self.history_idx))
+    
+    def compute(self):
+        """
+        Obtain the recursion level data for the given tile ("sector").
+        """
+
+        drpa = drawing_params.get(self.history_idx)    # local copy of the relevant drawing params
+        if not drpa:                                   # ensure our drawing params are the most recent
+            return False                               # do nothing with obsolete WorkUnit objects
+        
+        try:
+            sector_x,sector_y = screenstuff.sectors[self.sector_idx]
+        except IndexError:
+            logger.info("Seems that index %d isn't valid." % self.sector_idx)
+            return False
+        else:
+            window_x, window_y = screenstuff.window_dims()
+            start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
+            start_coord_y = screenstuff.coordmin_y(drpa) + (screenstuff.coordrange_y(drpa) * sector_y)/window_y
+            lib.compute_sector(self.data, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
+            self.data = pygame.image.fromstring(self.data, (sector_size,sector_size), "RGB")
+            return True
+
+    def colorize(self, palelle_idx):
+        """
+        Convert the recusion level data to a pygame image, return it.
+        """
+        pass
 
 
 
@@ -373,19 +429,7 @@ class Worker():
             while clickables['run']:
                 try:
                     workunit = todo_queue.get(timeout=1.0)             # obtain a WorkUnit or get an exception
-                    drpa = drawing_params.get(workunit.history_idx)    # local copy of the relevant drawing params
-                    if not drpa:                                       # ensure our drawing params are the most recent
-                        continue                                       # do nothing with obsolete WorkUnit objects
-                    try:
-                        sector_x,sector_y = screenstuff.sectors[workunit.sector_idx]
-                    except IndexError:
-                        logger.info("Seems that index %d isn't valid." % sector_idx)
-                    else:
-                        window_x, window_y = screenstuff.window_dims()
-                        start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
-                        start_coord_y = screenstuff.coordmin_y(drpa) + (screenstuff.coordrange_y(drpa) * sector_y)/window_y
-                        lib.compute_sector(workunit.data, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
-                        workunit.data = pygame.image.fromstring(workunit.data, (sector_size,sector_size), "RGB")
+                    if workunit.compute():
                         done_queue.put(workunit)
                 except Empty:
                     logger.debug("Todo queue was empty.")
