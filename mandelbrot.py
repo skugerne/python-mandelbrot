@@ -1,6 +1,6 @@
 from cffi import FFI
 from time import time, sleep
-from math import log
+from math import log, floor
 from queue import SimpleQueue, Empty
 from multiprocessing import cpu_count
 import pygame, threading, traceback
@@ -24,11 +24,13 @@ logger.addHandler(file_handler)
 
 
 max_recursion = 4096         # maybe 2**16-1 eventually?
-sector_size = 40             # just about any modern screen res seems to be divisible by 20 or 40, with 16 or 32 being more rare
+sector_size = 20             # smaller tiles mean more thread overhead, but are more efficient in black areas
 todo_queue = SimpleQueue()   # WorkUnit objects to process
 done_queue = SimpleQueue()   # WorkUnit objects that are done
 zoom_step = 0.9
 zoom_step_inv = 1 / zoom_step
+global_coord_scale = sector_size / (2.47 * 4)
+tile_cache = {}              # recursion level data indexed by tuples (zoom,row,col,coord_per_sector)
 
 
 
@@ -48,7 +50,7 @@ def screen_w_to_zoom_level(w):
     """
     ratio = 2.47 / w
     return int(log(ratio,zoom_step_inv) + 0.5)
-
+    
 
 
 class DrawingParamsHistory():
@@ -134,17 +136,65 @@ class DrawingParams():
     """
     A class to package various drawing parameters at a given moment.
 
-    Note that various Y-axis values are not included, as they depend on display ratio, which can change.
+    Note that Y-axis values and row/col coords are not included, as they depend on display width and/or ratio, which can change.
     """
 
     def __init__(self, coord_x, coord_y, coordrange_x, palette_idx):
         self.coord_x      = coord_x
         self.coord_y      = coord_y
-        self.coordrange_x = zoom_level_to_screen_w(screen_w_to_zoom_level(coordrange_x))
+        self.zoomlevel    = screen_w_to_zoom_level(coordrange_x)
+        self.coordrange_x = zoom_level_to_screen_w(self.zoomlevel)
         self.palette_idx  = palette_idx
         self.coordmin_x   = self.coord_x - self.coordrange_x/2
         self.coordmax_x   = self.coord_x + self.coordrange_x/2
-        self.forgotten    = False                           # when we go back in history, we forget items, but leave them in place (could leave a None or something to save RAM)
+        self.forgotten    = False                        # when we go back in history, we forget items, but leave them in place (could leave a None or something to save RAM)
+
+    def coordrange_y(self):
+        """
+        Give the displayed coordinate range in the Y direction for this step in history (depends on current screen res).
+        """
+        window_x, window_y = screenstuff.window_dims()
+        return self.coordrange_x * window_y / window_x
+
+    def coordmin_y(self):
+        """
+        Give the smallest displayed Y coordinate for this step in history (depends on current screen res).
+        """
+        return self.coord_y - self.coordrange_y()/2
+
+    def get_rc_range(self):
+        """
+        Get the coord_per_sector, min_row, max_row, min_col, max_col for this step in history (depends on current screen res).
+        """
+
+        # this function defines the sectors, which differ by zoom level and by window x dimention
+        # the sectors are always the same regardless of the viewing location
+        # the sectors are defined on a coordinate system that extends from (-2,-2) to approximately (2,2)
+        # this is larger than the interesting area, but that is no problem (it costs nothing for the coordinates to be valid)
+
+        window_x, window_y = screenstuff.window_dims()
+        coordrange_y = self.coordrange_x * window_y / window_x
+        coordmin_y = self.coord_y - coordrange_y/2
+        coordmax_y = self.coord_y + coordrange_y/2
+        wider_than_screen = zoom_step_inv ** self.zoomlevel
+        sectors_per = wider_than_screen * window_x * global_coord_scale
+        coord_per_sector = 4 / sectors_per
+        min_row = int(floor(coordmin_y / coord_per_sector))
+        max_row = int(floor(coordmax_y / coord_per_sector))
+        min_col = int(floor(self.coordmin_x / coord_per_sector))
+        max_col = int(floor(self.coordmax_x / coord_per_sector))
+        logger.info("coord_per_sector=%s, min_rows=%d, max_row=%d, min_col=%d, max_col=%d" % (coord_per_sector, min_row, max_row, min_col, max_col))
+        return coord_per_sector, min_row, max_row, min_col, max_col
+
+    def get_cache_keys(self):
+        """
+        Get the cache keys for this step in history (depends on current screen res).
+        """
+
+        coord_per_sector, min_row, max_row, min_col, max_col = self.get_rc_range()
+        for r in range(min_row,max_row+1):
+            for c in range(min_col,max_col+1):
+                yield((self.zoomlevel,r,c,coord_per_sector))
 
     
 
@@ -174,7 +224,7 @@ class WorkUnit():
         else:
             window_x, window_y = screenstuff.window_dims()
             start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
-            start_coord_y = screenstuff.coordmin_y(drpa) + (screenstuff.coordrange_y(drpa) * sector_y)/window_y
+            start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sector_y)/window_y
             lib.compute_sector(self.data, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
             self.data = pygame.image.fromstring(self.data, (sector_size,sector_size), "RGB")
             return True
@@ -243,18 +293,6 @@ class ScreenSectors():
 
     def window_dims(self):
         return self.window_x, self.window_y
-
-    def coordrange_y(self, drpa):
-        """
-        Give the displayed coordinate range in the Y direction (depends on screen res and a DrawingParams object).
-        """
-        return drpa.coordrange_x * self.window_y / self.window_x
-
-    def coordmin_y(self, drpa):
-        """
-        Give the smallest displayed Y coordinate (depends on screen res and a DrawingParams object).
-        """
-        return drpa.coord_y - self.coordrange_y(drpa)/2
 
 
 
@@ -592,7 +630,7 @@ def mouse_to_sim(coord, clickboxes=None):
                 return None
     drpa = drawing_params.last()
     simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/screenstuff.window_x
-    simy = screenstuff.coordmin_y(drpa) + screenstuff.coordrange_y(drpa) * coord[1]/screenstuff.window_y
+    simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/screenstuff.window_y
     return simx,simy
 
 
@@ -704,7 +742,7 @@ def handle_mouse_button_up(todo, clickboxes):
         drpa = drawing_params.last()
         drawing_params.add(
             coord_x = drpa.coord_x - drpa.coordrange_x * drag_px / window_x,
-            coord_y = drpa.coord_y - screenstuff.coordrange_y(drpa) * drag_py / window_y
+            coord_y = drpa.coord_y - drpa.coordrange_y() * drag_py / window_y
         )
 
     clickables['mousedown'] = None
