@@ -24,20 +24,22 @@ logger.addHandler(file_handler)
 
 
 max_recursion = 4096         # maybe 2**16-1 eventually?
-sector_size = 20             # smaller tiles mean more thread overhead, but are more efficient in black areas
+tile_size = 20               # smaller tiles mean more thread overhead, but are more efficient in black areas
 todo_queue = SimpleQueue()   # WorkUnit objects to process
 done_queue = SimpleQueue()   # WorkUnit objects that are done
 zoom_step = 0.9
 zoom_step_inv = 1 / zoom_step
-global_coord_scale = sector_size / (2.47 * 4)
-tile_cache = {}              # recursion level data indexed by tuples (zoom,row,col,coord_per_sector)
+minimum_fractalspace_coord = (-2, -2)
+
+tile_cache = {}              # WorkUnit objects indexed by tuples (zoom,row,col,simcoord_per_tile)
 
 
 
 def zoom_level_to_screen_w(l):
     """
-    Given a human-friendly zoom level, determine the coordinate range (as one number) of the screen width.
-    Zoom level 0 is a X-coordinate width of 2.47.
+    Given a human-friendly zoom level, determine the calculation/simulation/fractalspace coordinate range (as one number) of the screen width.
+    This deals with how much of the fractal is displayable (in the X/col direction).
+    Zoom level 0 is a calculation/simulation/fractalspace X-coordinate width of 2.47.
     """
     return 2.47 / zoom_step_inv ** l
 
@@ -45,8 +47,9 @@ def zoom_level_to_screen_w(l):
 
 def screen_w_to_zoom_level(w):
     """
-    Given the coordinate range (as one number) of the screen width, return a human-friendly zoom level.
-    Zoom level 0 is a X-coordinate width of 2.47.
+    Given the calculation/simulation/fractalspace coordinate range (as one number) of the screen width, return a human-friendly zoom level.
+    This deals with how much of the fractal is displayable (in the X/col direction).
+    Zoom level 0 is a calculation/simulation/fractalspace X-coordinate width of 2.47.
     """
     ratio = 2.47 / w
     return int(log(ratio,zoom_step_inv) + 0.5)
@@ -63,7 +66,7 @@ class DrawingParamsHistory():
             DrawingParams(
                 coord_x      = (0.47 - 2.00)/2,
                 coord_y      = 0,
-                coordrange_x = 2.47,
+                zoomlevel    = 0,
                 palette_idx  = 0
             )
         ]
@@ -86,17 +89,9 @@ class DrawingParamsHistory():
         """
         Return how far we have zoomed in.
         """
-        with self.lock:
-            return self.param_history[0].coordrange_x / self.param_history[self.current_idx].coordrange_x
+        return 2.47 / self.last().coordrange_x
         
-    def current_depth(self):
-        """
-        Return about how many "zooms" have been done, assuming a zoom is to 9/10 of current screen.
-        """
-        with self.lock:
-            return screen_w_to_zoom_level(self.param_history[self.current_idx].coordrange_x)
-        
-    def add(self, coord_x=None, coord_y=None, coordrange_x=None, palette_idx=None):
+    def add(self, coord_x=None, coord_y=None, zoomlevel=None, palette_idx=None):
         """
         Add the specified drawing parameters to the stack.  We always add more, never delete.
         """
@@ -105,9 +100,11 @@ class DrawingParamsHistory():
             p = self.last()
             if coord_x == None:      coord_x = p.coord_x
             if coord_y == None:      coord_y = p.coord_y
-            if coordrange_x == None: coordrange_x = p.coordrange_x
+            if zoomlevel == None:    zoomlevel = p.zoomlevel
             if palette_idx == None:  palette_idx = p.palette_idx
-            d = DrawingParams(coord_x, coord_y, coordrange_x, palette_idx)
+            if zoomlevel < 0:
+                zoomlevel = 0
+            d = DrawingParams(coord_x, coord_y, zoomlevel, palette_idx)
             self.param_history.append(d)
             self.current_idx = len(self.param_history)-1
             return d
@@ -139,131 +136,170 @@ class DrawingParams():
     Note that Y-axis values and row/col coords are not included, as they depend on display width and/or ratio, which can change.
     """
 
-    def __init__(self, coord_x, coord_y, coordrange_x, palette_idx):
-        self.coord_x      = coord_x
-        self.coord_y      = coord_y
-        self.zoomlevel    = screen_w_to_zoom_level(coordrange_x)
-        self.coordrange_x = zoom_level_to_screen_w(self.zoomlevel)
+    def __init__(self, coord_x, coord_y, zoomlevel, palette_idx):
+        # the coordinates below are calculation/simulation/fractalspace coordinates, not screen coordinates
+        self.coord_x      = coord_x     # center coord
+        self.coord_y      = coord_y     # center coord
+        self.zoomlevel    = zoomlevel
+        self.coordrange_x = zoom_level_to_screen_w(zoomlevel)
         self.palette_idx  = palette_idx
         self.coordmin_x   = self.coord_x - self.coordrange_x/2
         self.coordmax_x   = self.coord_x + self.coordrange_x/2
         self.forgotten    = False                        # when we go back in history, we forget items, but leave them in place (could leave a None or something to save RAM)
 
+    def y_axis_properties(self):
+        """
+        Give Y-axis properties for this step in history (depends on current screen res).
+        """
+        window_x, window_y = screenstuff.window_dims()
+        coordrange_y = self.coordrange_x * window_y / window_x
+        coordmin_y = self.coord_y - coordrange_y/2
+        coordmax_y = self.coord_y + coordrange_y/2
+
+        return coordrange_y, coordmin_y, coordmax_y
+
     def coordrange_y(self):
         """
         Give the displayed coordinate range in the Y direction for this step in history (depends on current screen res).
         """
-        window_x, window_y = screenstuff.window_dims()
-        return self.coordrange_x * window_y / window_x
+        return self.y_axis_properties()[0]
 
     def coordmin_y(self):
         """
         Give the smallest displayed Y coordinate for this step in history (depends on current screen res).
         """
-        return self.coord_y - self.coordrange_y()/2
+        return self.y_axis_properties()[1]
 
     def get_rc_range(self):
         """
-        Get the coord_per_sector, min_row, max_row, min_col, max_col for this step in history (depends on current screen res).
+        Get the simcoord_per_tile, min_row, max_row, min_col, max_col for this step in history (depends on current screen res).
+        The row/col values indicate the calculation/simulation/fractalspace tiles which are displayable.
         """
 
-        # this function defines the sectors, which differ by zoom level and by window x dimention
-        # the sectors are always the same regardless of the viewing location
-        # the sectors are defined on a coordinate system that extends from (-2,-2) to approximately (2,2)
-        # this is larger than the interesting area, but that is no problem (it costs nothing for the coordinates to be valid)
+        # this function defines the tiles which can be seen, which differ by zoom level and by window x dimention
+        # the tiles are defined on a coordinate system that extends from (-2,-2) to approximately (2,2) (note: 'minimum_fractalspace_coord')
+        # the tile coordinates that are valid should not be confused with the tile coordinates which can be seen
+        # for most zoom levels, the valid tiles extend beyond interesting fractal features, but it costs nothing for the coordinates to be valid
 
-        window_x, window_y = screenstuff.window_dims()
-        coordrange_y = self.coordrange_x * window_y / window_x
-        coordmin_y = self.coord_y - coordrange_y/2
-        coordmax_y = self.coord_y + coordrange_y/2
+        window_x, _ = screenstuff.window_dims()
+        _, coordmin_y, coordmax_y = self.y_axis_properties()
+        logger.info("coordmax_x=%f, coordmin_x=%f, coordmax_y=%f, coordmin_y=%f" % (self.coordmax_x, self.coordmin_x, coordmax_y, coordmin_y))
+
+        # how much wider the calculation/simulation/fractalspace is than the screen can show (zoomlevel=0 -> wider_than_screen=1)
         wider_than_screen = zoom_step_inv ** self.zoomlevel
-        sectors_per = wider_than_screen * window_x * global_coord_scale
-        coord_per_sector = 4 / sectors_per
-        min_row = int(floor(coordmin_y / coord_per_sector))
-        max_row = int(floor(coordmax_y / coord_per_sector))
-        min_col = int(floor(self.coordmin_x / coord_per_sector))
-        max_col = int(floor(self.coordmax_x / coord_per_sector))
-        logger.info("coord_per_sector=%s, min_rows=%d, max_row=%d, min_col=%d, max_col=%d" % (coord_per_sector, min_row, max_row, min_col, max_col))
-        return coord_per_sector, min_row, max_row, min_col, max_col
+
+        tiles_per = wider_than_screen * window_x / tile_size
+        logger.info("wider_than_screen=%f, tiles_per=%f" % (wider_than_screen, tiles_per))
+        simcoord_per_tile = 2.47 / tiles_per
+        min_row = int(floor((coordmin_y - minimum_fractalspace_coord[1]) / simcoord_per_tile))
+        max_row = int(floor((coordmax_y - minimum_fractalspace_coord[1]) / simcoord_per_tile))
+        min_col = int(floor((self.coordmin_x - minimum_fractalspace_coord[0]) / simcoord_per_tile))
+        max_col = int(floor((self.coordmax_x - minimum_fractalspace_coord[0]) / simcoord_per_tile))
+        logger.info("simcoord_per_tile=%s, min_row=%d, max_row=%d, min_col=%d, max_col=%d" % (simcoord_per_tile, min_row, max_row, min_col, max_col))
+        return simcoord_per_tile, min_row, max_row, min_col, max_col
 
     def get_cache_keys(self):
         """
-        Get the cache keys for this step in history (depends on current screen res).
+        Get the cache keys which are displayable in this step in history (depends on current screen res).
         """
 
-        coord_per_sector, min_row, max_row, min_col, max_col = self.get_rc_range()
+        simcoord_per_tile, min_row, max_row, min_col, max_col = self.get_rc_range()
         for r in range(min_row,max_row+1):
             for c in range(min_col,max_col+1):
-                yield((self.zoomlevel,r,c,coord_per_sector))
+                yield((self.zoomlevel,r,c,simcoord_per_tile))
 
+    def display_tile(self, workunit):
+        """
+        Show the given tile on the screen.  The upper left is (0,0).
+        """
+        
+        logger.info("Display a tile %s." % str(workunit.coord()))
+
+        zoom_level, row, col, simcoord_per_tile = workunit.cache_key
+        assert zoom_level == self.zoomlevel, "Somehow got the wrong zoom level."
+        # NOTE: we theoretically are getting only tiles with the correct simcoord_per_tile, so we skip recalculating it
+
+        #center_tile_row = (self.coord_x - minimum_fractalspace_coord[0]) / simcoord_per_tile
+        #window_x, _ = screenstuff.window_dims()
+        tile_simx = minimum_fractalspace_coord[0] + col * simcoord_per_tile
+        tile_simy = minimum_fractalspace_coord[1] + row * simcoord_per_tile
+        logger.info("row=%s, col=%s, tile_simx=%s, tile_simy=%s" % (row,col,tile_simx,tile_simy))
+        #simcoord_per_pixel = self.coordrange_x / window_x
+        simcoord_per_pixel = simcoord_per_tile / tile_size
+        #logger.info("simcoord_per_pixel=%s, simcoord_per_pixel_2=%s" % (simcoord_per_pixel,simcoord_per_pixel_2))
+        draw_x = (tile_simx - self.coordmin_x) / simcoord_per_pixel
+        draw_y = (tile_simy - self.coordmin_y()) / simcoord_per_pixel
+
+        screenstuff.screen.blit(workunit.data, (draw_x,draw_y))
+        #text_surface_2 = pygame.surface.Surface((tile_size, tile_size))
+        #text_surface_2.fill((row%256,col%256,(row+col)%256))
+        #screenstuff.screen.blit(text_surface_2, (draw_x,draw_y))
+
+        #text_surface_2 = pygame.surface.Surface((tile_size, tile_size))
+        #text_surface_2.fill((255,0,0))
+        #screenstuff.screen.blit(text_surface_2, (50,50))
+
+        #text_surface_2 = pygame.surface.Surface((tile_size, tile_size))
+        #text_surface_2.fill((0,255,0))
+        #screenstuff.screen.blit(text_surface_2, (10,500))
+
+        logger.info("draw_x=%s, draw_y=%s" % (draw_x,draw_y))
+
+        
     
 
 class WorkUnit():
-    def __init__(self, sector_idx, history_idx):
-        self.sector_idx = sector_idx                     # used to decide what should be calculated (along with drawing parameters)
-        self.history_idx = history_idx                   # used to verify continued validity of work (and to look up drawing parameters)
-        self.data = b"0" * (sector_size*sector_size*3)   # store binary pixel data of result here, then replace with a Pygame Surface
+    def __init__(self, cache_key):
+        self.cache_key = cache_key                   # tuple (zoom,row,col,simcoord_per_tile)
+        self.data = b"0" * (tile_size*tile_size*3)   # store binary pixel data of result here, then replace with a Pygame Surface (TODO: store uncolored data)
+        self.used = time()
+        self.processed = False
 
-    def __hash__(self):
-        return hash((self.sector_idx,self.history_idx))
-    
     def compute(self):
         """
-        Obtain the recursion level data for the given tile ("sector").
+        Compute the recursion level data for the given tile.
         """
 
-        drpa = drawing_params.get(self.history_idx)    # local copy of the relevant drawing params
-        if not drpa:                                   # ensure our drawing params are the most recent
-            return False                               # do nothing with obsolete WorkUnit objects
-        
-        try:
-            sector_x,sector_y = screenstuff.sectors[self.sector_idx]
-        except IndexError:
-            logger.info("Seems that index %d isn't valid." % self.sector_idx)
-            return False
-        else:
-            window_x, window_y = screenstuff.window_dims()
-            start_coord_x = drpa.coordmin_x + (drpa.coordrange_x * sector_x)/window_x
-            start_coord_y = drpa.coordmin_y() + (drpa.coordrange_y() * sector_y)/window_y
-            lib.compute_sector(self.data, start_coord_x, start_coord_y, drpa.coordrange_x/window_x)
-            self.data = pygame.image.fromstring(self.data, (sector_size,sector_size), "RGB")
-            return True
+        _, row, col, coord_per = self.cache_key
+        lib.compute_tile(self.data, row, col, coord_per)
+        self.data = pygame.image.fromstring(self.data, (tile_size,tile_size), "RGB")
+        self.processed = True
+        logger.info("Tile %s rendered." % str(self.coord()))
 
-    def colorize(self, palelle_idx):
+    def coord(self):
         """
-        Convert the recusion level data to a pygame image, return it.
+        The row,col of this data inside the tile grid defined for a zoom level.
         """
-        pass
+        return self.cache_key[1],self.cache_key[2]
+    
+    def simcoord(self):
+        """
+        The calculation/simulation/fractalspace smallest-corner coordinate for this data.
+        """
+        return tuple(
+            self.cache_key[1]*self.cache_key[3] - minimum_fractalspace_coord[0],
+            self.cache_key[2]*self.cache_key[3] - minimum_fractalspace_coord[0]
+        )
+            
 
 
-
-class ScreenSectors():
+class ScreenStuff():
     """
-    Divide the screen / coordinate system into sectors for processing.   Handle setup of screen, and switching between windowed and fullscreen.
+    Handle setup of screen, and switching between windowed and fullscreen.
     """
 
     def __init__(self):
+        self.history_idx = 0
         self.setup_screen(False)
 
     def refresh(self):
         """
-        Whenever a screen is resized (dragged out, or fullscreen change), we recalculate how many sectors/tiles there are.
+        Whenever a screen is resized (dragged out, or fullscreen change), we recalculate how large of a cache to maintain.
         """
 
         self.window_x, self.window_y = pygame.display.get_surface().get_size()
-
-        self.sectors = []
-        for x in range(0, self.window_x, sector_size):
-            for y in range(0, self.window_y, sector_size):
-                self.sectors.append((x,y))
-        logger.info("Have divided window into %d sectors." % len(self.sectors))
-
-        def dist(coord):
-            return (coord[0]-(self.window_x+sector_size)/2)**2 + (coord[1]-(self.window_y+sector_size)/2)**2
-
-        # we draw sectors that are closest to the screen center first
-        # this contains a list of indexes, sorted with highest priority first
-        self.sectorindexes = [x[1] for x in sorted([(dist(coord),idx) for idx,coord in enumerate(self.sectors)], reverse=False)]
+        self.cache_size = (self.window_x // tile_size + 1) * (self.window_y // tile_size + 1) * 4
+        logger.info("Set cache size: %d." % self.cache_size)
 
     def setup_screen(self, fullscreen):
         """
@@ -285,12 +321,6 @@ class ScreenSectors():
             self.screen = pygame.display.set_mode((wx,wy), pygame.RESIZABLE)
         self.refresh()
 
-    def display_tile(self,workunit):
-        """
-        Show the image for a tile ("sector").
-        """
-        self.screen.blit(workunit.data, self.sectors[workunit.sector_idx])
-
     def window_dims(self):
         return self.window_x, self.window_y
 
@@ -299,8 +329,10 @@ class ScreenSectors():
 # do some hacky inline C
 ffi = FFI()
 ffi.set_source("inlinehack", """
-#define SECTOR_SIZE """+str(sector_size)+"""
+#define TILE_SIZE """+str(tile_size)+"""
 #define MAX_RECURSION """+str(max_recursion)+"""
+#define MIN_FRACTACLSPACE_X """+str(minimum_fractalspace_coord[0])+"""
+#define MIN_FRACTACLSPACE_Y """+str(minimum_fractalspace_coord[1])+"""
 unsigned char *palette = NULL;       // RGB values for colors, 3 bytes per color
 int palette_color_count = 0;         // number of colors in palette
 
@@ -340,47 +372,50 @@ void colorize(unsigned char* data, int pixel_idx, int iterations){
     }
 }
 
-void compute_sector(unsigned char* data, double start_coord_x, double start_coord_y, double coord_step) {
+void compute_tile(unsigned char* data, unsigned int row, unsigned int col, double simcoord_per_tile) {
+    double coord_step = simcoord_per_tile / TILE_SIZE;
+    double start_coord_x = MIN_FRACTACLSPACE_X + col * simcoord_per_tile;
+    double start_coord_y = MIN_FRACTACLSPACE_Y + row * simcoord_per_tile;
     double coord_x = start_coord_x;
     double coord_y = start_coord_y;
-    double alt_coord = start_coord_x + (SECTOR_SIZE-1)*coord_step;
+    double alt_coord = start_coord_x + simcoord_per_tile - coord_step;     /* start_coord_x + simcoord_per_tile is the next tile) */
     int blacks = 0;
     int iterations = 0;
-    for( int i=0; i<SECTOR_SIZE; ++i ){           /* calculate left & right edges */
+    for( int i=0; i<TILE_SIZE; ++i ){           /* calculate left & right edges */
         iterations = mandlebrot(coord_x, coord_y);
-        colorize(data, i*SECTOR_SIZE, iterations);
+        colorize(data, i*TILE_SIZE, iterations);
         if(iterations == MAX_RECURSION) blacks += 1;
         iterations = mandlebrot(alt_coord, coord_y);
-        colorize(data, i*SECTOR_SIZE+SECTOR_SIZE-1, iterations);
+        colorize(data, i*TILE_SIZE+TILE_SIZE-1, iterations);
         if(iterations == MAX_RECURSION) blacks += 1;
         coord_y += coord_step;
     }
     coord_x = start_coord_x;
     coord_y = start_coord_y;
-    alt_coord = start_coord_y + (SECTOR_SIZE-1)*coord_step;
-    for( int i=1; i<SECTOR_SIZE-1; ++i ){         /* calculate top & bottom edges */
+    alt_coord = start_coord_y + simcoord_per_tile - coord_step;            /* start_coord_y + simcoord_per_tile is the next tile) */
+    for( int i=1; i<TILE_SIZE-1; ++i ){         /* calculate top & bottom edges */
         coord_x += coord_step;
         iterations = mandlebrot(coord_x, coord_y);
         colorize(data, i, iterations);
         if(iterations == MAX_RECURSION) blacks += 1;
         iterations = mandlebrot(coord_x, alt_coord);
-        colorize(data, SECTOR_SIZE*(SECTOR_SIZE-1)+i, iterations);
+        colorize(data, TILE_SIZE*(TILE_SIZE-1)+i, iterations);
         if(iterations == MAX_RECURSION) blacks += 1;
     }
-    if( blacks == 4*SECTOR_SIZE-4 ){              /* check for easy escape, big speedup inside the set */
-        for( int i=0; i<SECTOR_SIZE*SECTOR_SIZE*3; ++i )
+    if( blacks == 4*TILE_SIZE-4 ){              /* check for easy escape, big speedup inside the set */
+        for( int i=0; i<TILE_SIZE*TILE_SIZE*3; ++i )
             data[i] = 0;                          /* return all black pixels */
         return;
     }
     coord_x = start_coord_x;
-    for( int x=1; x<SECTOR_SIZE-1; ++x ){         /* fill in the middle */
+    for( int x=1; x<TILE_SIZE-1; ++x ){         /* fill in the middle */
         coord_x += coord_step;
         coord_y = start_coord_y;
-        for( int y=1; y<SECTOR_SIZE-1; ++y ){
+        for( int y=1; y<TILE_SIZE-1; ++y ){
             coord_y += coord_step;
             colorize(
                 data,
-                (x + y*SECTOR_SIZE),
+                (x + y*TILE_SIZE),
                 mandlebrot(coord_x,coord_y)
             );
         }
@@ -392,7 +427,7 @@ extern unsigned char *palette;          // RGB values for colors, 3 bytes per co
 extern int palette_color_count;         // number of colors in palette
 void set_palette(unsigned char *,int);
 long mandlebrot(double,double);
-void compute_sector(unsigned char *,double,double,double);
+void compute_tile(unsigned char *,double,double,double);
 """)
 logger.info("Compile...")
 ffi.compile()
@@ -404,15 +439,18 @@ from inlinehack import lib     # import the compiled library
 # start up the user interface
 pygame.init()
 drawing_params = DrawingParamsHistory()
-screenstuff = ScreenSectors()
+screenstuff = ScreenStuff()
 pygame.display.set_caption('Mandelbrot')
 font = pygame.font.Font(pygame.font.get_default_font(), 14)
 textcache = dict()
 
 # a global, containing properties which can be edited and shared between threads
+# would be a bit cleaner to make it an object
 clickables = {
     'run': True,
     'fullscreen': False,
+    'work_remains': 0,
+    'num_visible_tiles': 0,
     'autozoom': True,
     'maxzoomed': False,
     'minzoomed': False,
@@ -466,9 +504,9 @@ class Worker():
         try:
             while clickables['run']:
                 try:
-                    workunit = todo_queue.get(timeout=1.0)             # obtain a WorkUnit or get an exception
-                    if workunit.compute():
-                        done_queue.put(workunit)
+                    workunit = todo_queue.get(timeout=1.0)      # obtain a WorkUnit or get an exception
+                    workunit.compute()                          # generate pixel data
+                    done_queue.put(workunit)                    # let the main thread know data is available
                 except Empty:
                     logger.debug("Todo queue was empty.")
                     sleep(0.1)
@@ -531,7 +569,7 @@ def blit_text(text_surface, left_edge):
 
 
 
-def draw_text_labels(todolen):
+def draw_text_labels():
     """
     Draw the buttons and status fields.
     """
@@ -579,7 +617,7 @@ def draw_text_labels(todolen):
     right_edge, _ = blit_text(text_surface, right_edge)
 
     # draw a count for how many items there are in history
-    text_surface = text_box('level: %d' % drawing_params.current_depth(), textcolor, backgroundcolor)
+    text_surface = text_box('level: %d' % drawing_params.last().zoomlevel, textcolor, backgroundcolor)
     right_edge, _ = blit_text(text_surface, right_edge)
 
     if not clickables['maxzoomed']:
@@ -612,7 +650,7 @@ def draw_text_labels(todolen):
     clickboxes.append(switch_colors)
     draw_button_box(mouse_coord, switch_colors_rect)
     
-    perc = int(round(100 * todolen / len(screenstuff.sectors)))
+    perc = int(round(100 * clickables['work_remains'] / clickables['num_visible_tiles']))
     text_surface = text_box('todo: %3d%%' % perc, textcolor, backgroundcolor)
     right_edge, _ = blit_text(text_surface, right_edge)
 
@@ -620,9 +658,9 @@ def draw_text_labels(todolen):
 
 
 
-def mouse_to_sim(coord, clickboxes=None):
+def screencoord_to_simcoord(coord, clickboxes=None):
     """
-    Convert mouse coordinates to calculation coordinates.
+    Convert screen coordinates to calculation/simulation/fractalspace coordinates.
     """
     if clickboxes:
         for box in clickboxes:     # optionally ignore coords that fall in clickboxes
@@ -632,81 +670,10 @@ def mouse_to_sim(coord, clickboxes=None):
     simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/screenstuff.window_x
     simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/screenstuff.window_y
     return simx,simy
-
-
-
-def coord_to_sector_idx(x,y):
-    """
-    Given an x,y determine what sector it lands in, return the index of that sector.
-    Return None if the coord is out of bounds.
-    """
-    window_x, window_y = screenstuff.window_dims()
-    if x < 0 or x >= window_x or y < 0 or y >= window_y:
-        return None
-    x2 = x // sector_size
-    y2 = y // sector_size
-    x_sector_len = (window_y + sector_size - 1) // sector_size
-    return x2 * x_sector_len + y2
-
-
-
-def reconsider_todo(todo, drag_px, drag_py):
-    """
-    Copy-paste areas of the screen that can be re-used, determine what sectors need to be processed.
-    """
-
-    logger.debug("Before drag there are %d sectors to do." % len(todo))
-
-    window_x, window_y = screenstuff.window_dims()
-
-    screenstuff.screen.blit(screenstuff.screen,(drag_px,drag_py))  # positive values are movement to right and down
-    if drag_px:
-        black = pygame.surface.Surface((abs(drag_px),window_y))
-        black.fill((0,0,0))
-        if drag_px > 0:
-            screenstuff.screen.blit(black, dest=(0,0))
-        else:
-            screenstuff.screen.blit(black, dest=(window_x-abs(drag_px),0))
-    if drag_py:
-        black = pygame.surface.Surface((window_x,abs(drag_py)))
-        black.fill((0,0,0))
-        if drag_py > 0:
-            screenstuff.screen.blit(black, dest=(0,0))
-        else:
-            screenstuff.screen.blit(black, dest=(0,window_y-abs(drag_py)))
-    pygame.display.flip()
-    newtodo = set()
-    idx = 0
-    for x in range(0, window_x, sector_size):
-        for y in range(0, window_y, sector_size):
-            if y <= clickables['text_hieght'] + drag_py:
-                newtodo.add(idx)      # refresh anything behind the text area
-            if (drag_px > 0 and x <= drag_px) or (drag_px < 0 and x+sector_size > window_x-abs(drag_px)):
-                newtodo.add(idx)      # refresh left and right
-            if (drag_py > 0 and y <= drag_py) or (drag_py < 0 and y+sector_size > window_y-abs(drag_py)):
-                newtodo.add(idx)      # refresh top and bottom
-            idx += 1
-    for sector_idx in todo:           # see what new sectors the old ones trigger updates on
-        x,y = screenstuff.sectors[sector_idx]
-        x += drag_px
-        y += drag_py
-        newtodo.add(coord_to_sector_idx(x,y))
-        if drag_px % sector_size:
-            newtodo.add(coord_to_sector_idx(x+sector_size,y))
-            if drag_py % sector_size:
-                newtodo.add(coord_to_sector_idx(x+sector_size,y+sector_size))
-        if drag_py % sector_size:
-            newtodo.add(coord_to_sector_idx(x,y+sector_size))
-    newnewtodo = []
-    for idx in screenstuff.sectorindexes:    # get these sectors sorted by distance from the center
-        if idx in newtodo:
-            newnewtodo.append(idx)
-    logger.debug("After drag there are %d sectors to do." % len(newnewtodo))
-    return newnewtodo
     
 
 
-def handle_mouse_button_up(todo, clickboxes):
+def handle_mouse_button_up(clickboxes):
     """
     Handle mouse button up ("un-click") events.  It might be a button press, zoom center set, or a left-drag ending.
     """
@@ -719,15 +686,8 @@ def handle_mouse_button_up(todo, clickboxes):
     else:
         dragged = False
     if not dragged:
-        newcoord = mouse_to_sim(mousecoord, clickboxes)
+        newcoord = screencoord_to_simcoord(mousecoord, clickboxes)
         if newcoord:
-            logger.info("Mouse click to set center.")
-            if not clickables['autozoom']:
-                drag_px = window_x // 2 - mousecoord[0]
-                drag_py = window_y // 2 - mousecoord[1]
-                todo = reconsider_todo(todo,drag_px,drag_py)
-            else:
-                todo = []   # we've changed zoom, recalculate all sectors
             simx,simy = newcoord
             clickables['redraw'] = True
             drawing_params.add(coord_x = simx, coord_y = simy)
@@ -737,7 +697,6 @@ def handle_mouse_button_up(todo, clickboxes):
         logger.info("Mouse drag.")
         drag_px = mousecoord[0] - clickables['mousedown'][0]   # positive means dragging right
         drag_py = mousecoord[1] - clickables['mousedown'][1]   # positive means dragging down
-        todo = reconsider_todo(todo,drag_px,drag_py)
         clickables['redraw'] = True
         drpa = drawing_params.last()
         drawing_params.add(
@@ -747,46 +706,43 @@ def handle_mouse_button_up(todo, clickboxes):
 
     clickables['mousedown'] = None
 
-    return todo
 
 
-
-def handle_right_mouse_button_up(todo):
+def handle_right_mouse_button_up():
     """
     Right-click drag will indicate a zoom box.
     """
 
     # if we somehow didn't see a mouse down event, then we have nothing to do here
     if not clickables['rightmousedown']:
-        return todo
+        return
 
     x2,y2 = pygame.mouse.get_pos()
     x1,y1 = clickables['rightmousedown']
     
     # its not a drag unless there was meaningful mouse movement
     if abs(x1-x2) + abs(y1-y2) < 3:
-        return todo
+        return
     
-    simx1,simy1 = mouse_to_sim((x1,y1))
-    simx2,simy2 = mouse_to_sim((x2,y2))
+    simx1,simy1 = screencoord_to_simcoord((x1,y1))
+    simx2,simy2 = screencoord_to_simcoord((x2,y2))
 
     drawing_params.add(
         coord_x      = (simx1 + simx2) / 2,
         coord_y      = (simy1 + simy2) / 2,
-        coordrange_x = abs(simx1 - simx2)
+        zoomlevel    = screen_w_to_zoom_level(abs(simx1 - simx2))
     )
 
     clickables['redraw'] = True
-    return []   # redraw it all
 
 
 
-def handle_input(todo):
+def handle_input():
     """
     Handle input events (mouse & keyboard).  Also, end one display loop and start the next.
     """
 
-    clickboxes = draw_text_labels(len(todo))   # show the buttons and status fields
+    clickboxes = draw_text_labels()            # show the buttons and status fields
     pygame.display.flip()                      # display all the stuff to the user
 
     for event in pygame.event.get():
@@ -801,25 +757,18 @@ def handle_input(todo):
                 logger.info("Keyboard quit.")
             elif event.key in (pygame.K_DELETE,pygame.K_BACKSPACE):
                 drawing_params.back()
-                todo = []
                 clickables['redraw'] = True
                 logger.info("Backwards in history.")
             elif event.key in (pygame.K_MINUS,pygame.K_KP_MINUS):
-                todo = []
-                amount = 10/9
                 keys = pygame.key.get_pressed()
-                if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
-                    amount = amount ** 5
-                drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * amount)
+                amount = 5 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 1
+                drawing_params.add(zoomlevel = drawing_params.last().zoomlevel - amount)
                 clickables['redraw'] = True
                 logger.info("Zoom out.")
             elif event.key in (pygame.K_PLUS,pygame.K_KP_PLUS):
-                todo = []
-                amount = 9/10
                 keys = pygame.key.get_pressed()
-                if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
-                    amount = amount ** 5
-                drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * amount)
+                amount = 5 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 1
+                drawing_params.add(zoomlevel = drawing_params.last().zoomlevel + amount)
                 clickables['redraw'] = True
                 logger.info("Zoom in.")
         elif event.type == pygame.MOUSEBUTTONDOWN:
@@ -828,75 +777,90 @@ def handle_input(todo):
             clickables[key] = pygame.mouse.get_pos()
         elif event.type == pygame.MOUSEBUTTONUP:
             if event.button == pygame.BUTTON_LEFT:
-                todo = handle_mouse_button_up(todo,clickboxes)
+                handle_mouse_button_up(clickboxes)
             elif event.button == pygame.BUTTON_RIGHT:
-                todo = handle_right_mouse_button_up(todo)
+                handle_right_mouse_button_up()
         elif event.type == pygame.VIDEORESIZE:
             logger.info("Window resize/sizechanged event.")
             screenstuff.refresh()
-            todo = []
             clickables['redraw'] = True
 
     # handle autozoom
-    if clickables['autozoom'] and (not todo) and (not clickables['maxzoomed']):
+    if clickables['autozoom'] and (not clickables['work_remains']) and (not clickables['maxzoomed']):
         logger.info("Autozoom.")
-        drawing_params.add(coordrange_x = drawing_params.last().coordrange_x * 9/10)
+        drawing_params.add(zoomlevel = drawing_params.last().zoomlevel + 1)
         clickables['redraw'] = True
 
-    return todo
 
 
+def main():
+    # run until the user asks to quit
+    for _ in range(min(16,cpu_count())):   # spawn up to 16 threads (threads do not scale forever, you could parallelize better with larger tiles)
+        w = Worker()
+        w.start()
+    while clickables['run']:
+        dpl = drawing_params.last()
+        drawworthy_cache_keys = list(dpl.get_cache_keys())
+        clickables['num_visible_tiles'] = len(drawworthy_cache_keys)
+        logger.info("There are %d visible tiles." % clickables['num_visible_tiles'])
+    
+        # identify tiles that should be processed, send them into the machinery
+        clickables['work_remains'] = 0
+        for cache_key in drawworthy_cache_keys:
+            if cache_key in tile_cache:
+                if not tile_cache[cache_key].processed:
+                    clickables['work_remains'] += 1
+            else:
+                wu = WorkUnit(cache_key)
+                tile_cache[cache_key] = wu   # created with processed=False
+                todo_queue.put(wu)
+                clickables['work_remains'] += 1
+        logger.info("There are %d tiles to work on." % clickables['work_remains'])
 
-# run until the user asks to quit
-todo = []
-sleepstart = None
-for _ in range(min(16,cpu_count())):   # spawn up to 16 threads (threads do not scale forever, you could parallelize better with larger tiles)
-    w = Worker()
-    w.start()
-while clickables['run']:
-    history_idx = drawing_params.current_idx
+        timeout = time() + 1/30
 
-    if clickables['redraw']:
-        if todo:
-            logger.debug("Have redraw with todo len %d." % len(todo))
-            for sector_idx in todo:
-                todo_queue.put(WorkUnit(sector_idx,history_idx))
+        # support full redraws in case the need arises
+        if clickables['redraw']:
+            for cache_key in drawworthy_cache_keys:
+                if cache_key in tile_cache and tile_cache[cache_key].processed:
+                    workunit = tile_cache[cache_key]
+                    workunit.used = time()
+                    dpl.display_tile(workunit)
+            clickables['redraw'] = False
+
+        # clean up excessive cached images
+        if time() < timeout and len(tile_cache) > screenstuff.cache_size * 1.1:
+            how_many = len(tile_cache) - screenstuff.cache_size
+            logger.info("Trim %d items from cache." % how_many)
+            workunits = sorted(tile_cache.values(), key=lambda x: x.used)
+            while how_many:
+                how_many -= 1
+                del tile_cache[workunits[how_many].cache_key]
+        logger.info("There are %d items defined in cache." % len(tile_cache))
+    
+        # see if there are any tiles to show
+        if clickables['work_remains']:
+            try:
+                while True:
+                    workunit = done_queue.get_nowait()
+                    assert workunit.processed, "Work unit should be marked as processed."
+
+                    if workunit.cache_key not in tile_cache:
+                        logger.warning("Got a work unit that wasn't in the cache.")
+                        continue
+                    if workunit.cache_key in drawworthy_cache_keys:
+                        workunit.used = time()
+                        dpl.display_tile(workunit)
+                    if time() >= timeout:
+                        break
+            except Empty:
+                sleep(1/64)
         else:
-            logger.debug("Redraw all sectors.")
-            for sector_idx in screenstuff.sectorindexes:
-                todo_queue.put(WorkUnit(sector_idx,history_idx))
-            todo = screenstuff.sectorindexes[:]            # we'll be removing values, so make a copy
-        clickables['redraw'] = False
+            logger.debug("Avoid using CPU.")
+            sleep(1/64)    # avoid using CPU for nothing
+    
+        handle_input()
+    
+    pygame.quit()
 
-    if todo and ((not sleepstart) or time() - sleepstart > 0.2):
-        sleepstart = None
-        try:
-            timeout = time() + 1/30
-            while True:
-                workunit = done_queue.get_nowait()
-                if workunit.history_idx != history_idx:    # result from the wrong zoom level and/or scroll
-                    logger.debug("Got a tile from the wrong history index.")
-                    continue
-                try:
-                    todo.remove(workunit.sector_idx)
-                except (KeyError,ValueError) as err:
-                    logger.debug("Got a tile we were not expecting.")
-                    logger.debug(err,exc_info=True)        # result that we are not expecting, perhaps due to scrolling
-                    continue
-                screenstuff.display_tile(workunit)
-                if time() >= timeout:
-                    break
-        except Empty:
-            sleep(1/60)
-
-        # pause to display complete result a moment
-        if not todo:
-            logger.info("Done with image.")
-            sleepstart = time()
-    else:
-        logger.debug("Avoid using CPU.")
-        sleep(1/60)    # avoid using CPU for nothing
-
-    todo = handle_input(todo)
-
-pygame.quit()
+main()
