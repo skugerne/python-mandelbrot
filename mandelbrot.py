@@ -253,7 +253,8 @@ class WorkUnit():
         self.cache_key = cache_key                   # tuple (zoom,row,col,simcoord_per_tile)
         self.data = b"0" * (tile_size*tile_size*3)   # store binary pixel data of result here, then replace with a Pygame Surface (TODO: store uncolored data)
         self.used = time()
-        self.processed = False
+        self.processed = False  # becomes True when data is processed
+        self.resolved = False   # becomes True when data has reached main thread
 
     def compute(self):
         """
@@ -457,7 +458,8 @@ clickables = {
     'redraw': True,
     'mousedown': None,
     'rightmousedown': None,
-    'text_hieght': 0
+    'text_hieght': 0,
+    'queue_debug': {'in': 0, 'out': 0}
 }
 
 def zap(x):
@@ -793,72 +795,87 @@ def handle_input():
 
 
 
+def handle_tiles():
+    """
+    Queue and display tiles.
+    """
+
+    dpl = drawing_params.last()
+    drawworthy_cache_keys = list(dpl.get_cache_keys())
+    clickables['num_visible_tiles'] = len(drawworthy_cache_keys)
+    logger.info("There are %d visible tiles." % clickables['num_visible_tiles'])
+
+    # identify tiles that should be processed, send them into the machinery
+    clickables['work_remains'] = 0
+    for cache_key in drawworthy_cache_keys:
+        if cache_key in tile_cache:
+            if not (tile_cache[cache_key].processed and tile_cache[cache_key].resolved):
+                clickables['work_remains'] += 1
+        else:
+            wu = WorkUnit(cache_key)
+            tile_cache[cache_key] = wu   # created with processed=False
+            todo_queue.put(wu)
+            clickables['work_remains'] += 1
+            clickables['queue_debug']['in'] += 1
+    logger.info("There are %d tiles to work on." % clickables['work_remains'])
+
+    timeout = time() + 1/30
+
+    # support full redraws in case the need arises
+    if clickables['redraw']:
+        for cache_key in drawworthy_cache_keys:
+            if cache_key in tile_cache and tile_cache[cache_key].processed:
+                workunit = tile_cache[cache_key]
+                workunit.used = time()
+                dpl.display_tile(workunit)
+        clickables['redraw'] = False
+
+    # clean up excessive cached images
+    if time() < timeout and len(tile_cache) > screenstuff.cache_size * 1.1:
+        how_many = len(tile_cache) - screenstuff.cache_size
+        logger.info("Trim %d items from cache." % how_many)
+        workunits = sorted(tile_cache.values(), key=lambda x: x.used)
+        while how_many:
+            how_many -= 1
+            del tile_cache[workunits[how_many].cache_key]
+    logger.info("There are %d items defined in cache." % len(tile_cache))
+    
+    # see if there are any tiles to show
+    if clickables['work_remains']:
+        try:
+            while True:
+                workunit = done_queue.get_nowait()
+                assert workunit.processed, "Work unit should be marked as processed."
+                assert not workunit.resolved, "Work unit should not be marked as resolved."
+                workunit.resolved = True
+                clickables['queue_debug']['out'] += 1
+
+                if workunit.cache_key not in tile_cache:
+                    logger.warning("Got a work unit that wasn't in the cache.")
+                    continue
+                if workunit.cache_key in drawworthy_cache_keys:
+                    workunit.used = time()
+                    dpl.display_tile(workunit)
+                if time() >= timeout:
+                    break
+        except Empty:
+            sleep(1/64)
+    else:
+        logger.debug("Avoid using CPU.")
+        sleep(1/64)    # avoid using CPU for nothing
+
+    logger.info("Into the queue: %d, out of the queue: %d" % (clickables['queue_debug']['in'],clickables['queue_debug']['out']))
+
+
+
 def main():
     # run until the user asks to quit
     for _ in range(min(16,cpu_count())):   # spawn up to 16 threads (threads do not scale forever, you could parallelize better with larger tiles)
         w = Worker()
         w.start()
+
     while clickables['run']:
-        dpl = drawing_params.last()
-        drawworthy_cache_keys = list(dpl.get_cache_keys())
-        clickables['num_visible_tiles'] = len(drawworthy_cache_keys)
-        logger.info("There are %d visible tiles." % clickables['num_visible_tiles'])
-    
-        # identify tiles that should be processed, send them into the machinery
-        clickables['work_remains'] = 0
-        for cache_key in drawworthy_cache_keys:
-            if cache_key in tile_cache:
-                if not tile_cache[cache_key].processed:
-                    clickables['work_remains'] += 1
-            else:
-                wu = WorkUnit(cache_key)
-                tile_cache[cache_key] = wu   # created with processed=False
-                todo_queue.put(wu)
-                clickables['work_remains'] += 1
-        logger.info("There are %d tiles to work on." % clickables['work_remains'])
-
-        timeout = time() + 1/30
-
-        # support full redraws in case the need arises
-        if clickables['redraw']:
-            for cache_key in drawworthy_cache_keys:
-                if cache_key in tile_cache and tile_cache[cache_key].processed:
-                    workunit = tile_cache[cache_key]
-                    workunit.used = time()
-                    dpl.display_tile(workunit)
-            clickables['redraw'] = False
-
-        # clean up excessive cached images
-        if time() < timeout and len(tile_cache) > screenstuff.cache_size * 1.1:
-            how_many = len(tile_cache) - screenstuff.cache_size
-            logger.info("Trim %d items from cache." % how_many)
-            workunits = sorted(tile_cache.values(), key=lambda x: x.used)
-            while how_many:
-                how_many -= 1
-                del tile_cache[workunits[how_many].cache_key]
-        logger.info("There are %d items defined in cache." % len(tile_cache))
-    
-        # see if there are any tiles to show
-        if clickables['work_remains']:
-            try:
-                while True:
-                    workunit = done_queue.get_nowait()
-                    assert workunit.processed, "Work unit should be marked as processed."
-
-                    if workunit.cache_key not in tile_cache:
-                        logger.warning("Got a work unit that wasn't in the cache.")
-                        continue
-                    if workunit.cache_key in drawworthy_cache_keys:
-                        workunit.used = time()
-                        dpl.display_tile(workunit)
-                    if time() >= timeout:
-                        break
-            except Empty:
-                sleep(1/64)
-        else:
-            logger.debug("Avoid using CPU.")
-            sleep(1/64)    # avoid using CPU for nothing
-    
+        handle_tiles()
         handle_input()
     
     pygame.quit()
