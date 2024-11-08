@@ -1,9 +1,10 @@
 from cffi import FFI
 from time import time, sleep
 from math import log, floor
+from random import shuffle
 from queue import SimpleQueue, Empty
 from multiprocessing import cpu_count
-import pygame, threading, traceback
+import pygame, threading
 import logging
 
 
@@ -213,37 +214,23 @@ class DrawingParams():
         Show the given tile on the screen.  The upper left is (0,0).
         """
         
-        logger.info("Display a tile %s." % str(workunit.coord()))
+        #logger.info("Display a tile %s." % str(workunit.coord()))
 
         zoom_level, row, col, simcoord_per_tile = workunit.cache_key
         assert zoom_level == self.zoomlevel, "Somehow got the wrong zoom level."
         # NOTE: we theoretically are getting only tiles with the correct simcoord_per_tile, so we skip recalculating it
 
-        #center_tile_row = (self.coord_x - minimum_fractalspace_coord[0]) / simcoord_per_tile
-        #window_x, _ = screenstuff.window_dims()
         tile_simx = minimum_fractalspace_coord[0] + col * simcoord_per_tile
         tile_simy = minimum_fractalspace_coord[1] + row * simcoord_per_tile
-        logger.info("row=%s, col=%s, tile_simx=%s, tile_simy=%s" % (row,col,tile_simx,tile_simy))
-        #simcoord_per_pixel = self.coordrange_x / window_x
         simcoord_per_pixel = simcoord_per_tile / tile_size
-        #logger.info("simcoord_per_pixel=%s, simcoord_per_pixel_2=%s" % (simcoord_per_pixel,simcoord_per_pixel_2))
         draw_x = (tile_simx - self.coordmin_x) / simcoord_per_pixel
         draw_y = (tile_simy - self.coordmin_y()) / simcoord_per_pixel
 
         screenstuff.screen.blit(workunit.data, (draw_x,draw_y))
-        #text_surface_2 = pygame.surface.Surface((tile_size, tile_size))
-        #text_surface_2.fill((row%256,col%256,(row+col)%256))
-        #screenstuff.screen.blit(text_surface_2, (draw_x,draw_y))
 
-        #text_surface_2 = pygame.surface.Surface((tile_size, tile_size))
-        #text_surface_2.fill((255,0,0))
-        #screenstuff.screen.blit(text_surface_2, (50,50))
-
-        #text_surface_2 = pygame.surface.Surface((tile_size, tile_size))
-        #text_surface_2.fill((0,255,0))
-        #screenstuff.screen.blit(text_surface_2, (10,500))
-
-        logger.info("draw_x=%s, draw_y=%s" % (draw_x,draw_y))
+        #logger.info("row=%s, col=%s, tile_simx=%s, tile_simy=%s" % (row,col,tile_simx,tile_simy))
+        #logger.info("simcoord_per_pixel=%s, simcoord_per_pixel_2=%s" % (simcoord_per_pixel,simcoord_per_pixel_2))
+        #logger.info("draw_x=%s, draw_y=%s" % (draw_x,draw_y))
 
         
     
@@ -265,7 +252,7 @@ class WorkUnit():
         lib.compute_tile(self.data, row, col, coord_per)
         self.data = pygame.image.fromstring(self.data, (tile_size,tile_size), "RGB")
         self.processed = True
-        logger.info("Tile %s rendered." % str(self.coord()))
+        #logger.info("Tile %s rendered." % str(self.coord()))
 
     def coord(self):
         """
@@ -324,6 +311,11 @@ class ScreenStuff():
 
     def window_dims(self):
         return self.window_x, self.window_y
+    
+    def clear(self):
+        blank_surface = pygame.surface.Surface(self.screen.get_size())
+        blank_surface.fill((0,0,0))
+        self.screen.blit(blank_surface, dest=(0,0))
 
 
 
@@ -793,6 +785,9 @@ def handle_input():
         drawing_params.add(zoomlevel = drawing_params.last().zoomlevel + 1)
         clickables['redraw'] = True
 
+    if clickables['redraw']:
+        screenstuff.clear()
+        
 
 
 def handle_tiles():
@@ -802,6 +797,7 @@ def handle_tiles():
 
     dpl = drawing_params.last()
     drawworthy_cache_keys = list(dpl.get_cache_keys())
+    shuffle(drawworthy_cache_keys)
     clickables['num_visible_tiles'] = len(drawworthy_cache_keys)
     logger.info("There are %d visible tiles." % clickables['num_visible_tiles'])
 
@@ -859,6 +855,7 @@ def handle_tiles():
                 if time() >= timeout:
                     break
         except Empty:
+            logger.debug("Empty done queue.")
             sleep(1/64)
     else:
         logger.debug("Avoid using CPU.")
