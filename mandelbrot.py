@@ -19,13 +19,13 @@ logger.addHandler(console_handler)
 
 file_handler = logging.FileHandler('run.log', mode='w', encoding='utf8')
 file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - TH%(thread)d - %(levelname)s - %(message)s','%y%m%d %H:%M:%S'))
+file_handler.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d - %(name)s - TH%(thread)d - %(levelname)s - %(message)s','%H:%M:%S'))
 logger.addHandler(file_handler)
 
 
 
 max_recursion = 4096         # maybe 2**16-1 eventually?
-tile_size = 20               # smaller tiles mean more thread overhead, but are more efficient in black areas
+tile_size = 32               # smaller tiles mean more thread and cache overhead, but are more efficient in black areas
 todo_queue = SimpleQueue()   # WorkUnit objects to process
 done_queue = SimpleQueue()   # WorkUnit objects that are done
 zoom_step = 0.9
@@ -184,19 +184,19 @@ class DrawingParams():
 
         window_x, _ = screenstuff.window_dims()
         _, coordmin_y, coordmax_y = self.y_axis_properties()
-        logger.info("coordmax_x=%f, coordmin_x=%f, coordmax_y=%f, coordmin_y=%f" % (self.coordmax_x, self.coordmin_x, coordmax_y, coordmin_y))
+        #logger.info("coordmax_x=%f, coordmin_x=%f, coordmax_y=%f, coordmin_y=%f" % (self.coordmax_x, self.coordmin_x, coordmax_y, coordmin_y))
 
         # how much wider the calculation/simulation/fractalspace is than the screen can show (zoomlevel=0 -> wider_than_screen=1)
         wider_than_screen = zoom_step_inv ** self.zoomlevel
 
         tiles_per = wider_than_screen * window_x / tile_size
-        logger.info("wider_than_screen=%f, tiles_per=%f" % (wider_than_screen, tiles_per))
+        #logger.info("wider_than_screen=%f, tiles_per=%f" % (wider_than_screen, tiles_per))
         simcoord_per_tile = 2.47 / tiles_per
         min_row = int(floor((coordmin_y - minimum_fractalspace_coord[1]) / simcoord_per_tile))
         max_row = int(floor((coordmax_y - minimum_fractalspace_coord[1]) / simcoord_per_tile))
         min_col = int(floor((self.coordmin_x - minimum_fractalspace_coord[0]) / simcoord_per_tile))
         max_col = int(floor((self.coordmax_x - minimum_fractalspace_coord[0]) / simcoord_per_tile))
-        logger.info("simcoord_per_tile=%s, min_row=%d, max_row=%d, min_col=%d, max_col=%d" % (simcoord_per_tile, min_row, max_row, min_col, max_col))
+        #logger.info("simcoord_per_tile=%s, min_row=%d, max_row=%d, min_col=%d, max_col=%d" % (simcoord_per_tile, min_row, max_row, min_col, max_col))
         return simcoord_per_tile, min_row, max_row, min_col, max_col
 
     def get_cache_keys(self):
@@ -286,7 +286,17 @@ class ScreenStuff():
         """
 
         self.window_x, self.window_y = pygame.display.get_surface().get_size()
-        self.cache_size = (self.window_x // tile_size + 1) * (self.window_y // tile_size + 1) * 4
+
+        self.blank_surface = pygame.surface.Surface(self.screen.get_size())
+        self.blank_surface.fill((0,0,0))
+        for x in range(self.window_x):
+            for y in range(self.window_y):
+                if (x + y) % 8 == 0 or (x - y) % 8 == 0:
+                    self.blank_surface.set_at((x, y), (24,24,24))
+        self.clear()
+
+        # a larger cache size makes trimming it more time-consuming
+        self.cache_size = (self.window_x // tile_size + 1) * (self.window_y // tile_size + 1) * 16
         logger.info("Set cache size: %d." % self.cache_size)
 
     def setup_screen(self, fullscreen):
@@ -313,9 +323,10 @@ class ScreenStuff():
         return self.window_x, self.window_y
     
     def clear(self):
-        blank_surface = pygame.surface.Surface(self.screen.get_size())
-        blank_surface.fill((0,0,0))
-        self.screen.blit(blank_surface, dest=(0,0))
+        """
+        Replace all screen contents with our 'blank' image.
+        """
+        self.screen.blit(self.blank_surface, dest=(0,0))
 
 
 
@@ -743,16 +754,20 @@ def handle_input():
         if event.type == pygame.QUIT:
             clickables['run'] = False
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_SPACE:
+            if event.key == pygame.K_SPACE:                                                 # space to toggle autozoom
                 clickables['autozoom'] = not clickables['autozoom']
                 logger.info("Set autozoom to: %s" % str(clickables['autozoom']))
-            elif event.key in (pygame.K_q,pygame.K_ESCAPE):
+            elif event.key in (pygame.K_q,pygame.K_ESCAPE):                                 # Q or escape to quit
                 clickables['run'] = False
                 logger.info("Keyboard quit.")
             elif event.key in (pygame.K_DELETE,pygame.K_BACKSPACE):
                 drawing_params.back()
                 clickables['redraw'] = True
                 logger.info("Backwards in history.")
+            elif event.key == pygame.K_f:                                                   # F for fullscreen toggle
+                clickables['fullscreen'] = not clickables['fullscreen']
+                screenstuff.setup_screen(clickables['fullscreen'])
+                clickables['redraw'] = True
             elif event.key in (pygame.K_MINUS,pygame.K_KP_MINUS):
                 keys = pygame.key.get_pressed()
                 amount = 5 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 1
@@ -795,11 +810,13 @@ def handle_tiles():
     Queue and display tiles.
     """
 
+    timeout = time() + 1/30
+
     dpl = drawing_params.last()
     drawworthy_cache_keys = list(dpl.get_cache_keys())
     shuffle(drawworthy_cache_keys)
     clickables['num_visible_tiles'] = len(drawworthy_cache_keys)
-    logger.info("There are %d visible tiles." % clickables['num_visible_tiles'])
+    logger.debug("There are %d visible tiles." % clickables['num_visible_tiles'])
 
     # identify tiles that should be processed, send them into the machinery
     clickables['work_remains'] = 0
@@ -813,9 +830,7 @@ def handle_tiles():
             todo_queue.put(wu)
             clickables['work_remains'] += 1
             clickables['queue_debug']['in'] += 1
-    logger.info("There are %d tiles to work on." % clickables['work_remains'])
-
-    timeout = time() + 1/30
+    logger.debug("There are %d tiles to work on." % clickables['work_remains'])
 
     # support full redraws in case the need arises
     if clickables['redraw']:
@@ -827,14 +842,14 @@ def handle_tiles():
         clickables['redraw'] = False
 
     # clean up excessive cached images
-    if time() < timeout and len(tile_cache) > screenstuff.cache_size * 1.1:
-        how_many = len(tile_cache) - screenstuff.cache_size
+    if time() < timeout and len(tile_cache) > screenstuff.cache_size:
+        how_many = max(1,(len(tile_cache) - screenstuff.cache_size)//8)
         logger.info("Trim %d items from cache." % how_many)
         workunits = sorted(tile_cache.values(), key=lambda x: x.used)
         while how_many:
             how_many -= 1
             del tile_cache[workunits[how_many].cache_key]
-    logger.info("There are %d items defined in cache." % len(tile_cache))
+    logger.debug("There are %d items defined in cache." % len(tile_cache))
     
     # see if there are any tiles to show
     if clickables['work_remains']:
@@ -861,7 +876,7 @@ def handle_tiles():
         logger.debug("Avoid using CPU.")
         sleep(1/64)    # avoid using CPU for nothing
 
-    logger.info("Into the queue: %d, out of the queue: %d" % (clickables['queue_debug']['in'],clickables['queue_debug']['out']))
+    logger.debug("Into the queue: %d, out of the queue: %d" % (clickables['queue_debug']['in'],clickables['queue_debug']['out']))
 
 
 
@@ -872,8 +887,12 @@ def main():
         w.start()
 
     while clickables['run']:
+        t1 = time()
         handle_tiles()
+        t2 = time()
         handle_input()
+        t3 = time()
+        logger.debug("Spent %.02fs handling tiles, %.02fs handling input, %.02fs on both." % (t2-t1,t3-t2,t3-t1))
     
     pygame.quit()
 
