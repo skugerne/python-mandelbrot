@@ -139,15 +139,19 @@ class DrawingParams():
 
     def __init__(self, coord_x, coord_y, zoomlevel, palette_idx):
         # the coordinates below are calculation/simulation/fractalspace coordinates, not screen coordinates
-        self.coord_x      = coord_x     # center coord
-        self.coord_y      = coord_y     # center coord
         self.zoomlevel    = zoomlevel
         self.coordrange_x = zoom_level_to_screen_w(zoomlevel)
+        self.set_coord(coord_x,coord_y)
         self.palette_idx  = palette_idx
-        self.coordmin_x   = self.coord_x - self.coordrange_x/2
-        self.coordmax_x   = self.coord_x + self.coordrange_x/2
         self.forgotten    = False                        # when we go back in history, we forget items, but leave them in place (could leave a None or something to save RAM)
 
+    def set_coord(self,coord_x,coord_y):
+        logger.info("Center simcoord: %s, %s" % (coord_x,coord_y))
+        self.coord_x      = coord_x     # center coord
+        self.coord_y      = coord_y     # center coord
+        self.coordmin_x   = self.coord_x - self.coordrange_x/2
+        self.coordmax_x   = self.coord_x + self.coordrange_x/2
+        
     def y_axis_properties(self):
         """
         Give Y-axis properties for this step in history (depends on current screen res).
@@ -287,6 +291,7 @@ class ScreenStuff():
 
         self.window_x, self.window_y = pygame.display.get_surface().get_size()
 
+        # provide a background pattern so we can see tiles fill in
         self.blank_surface = pygame.surface.Surface(self.screen.get_size())
         self.blank_surface.fill((0,0,0))
         for x in range(self.window_x):
@@ -296,7 +301,7 @@ class ScreenStuff():
         self.clear()
 
         # a larger cache size makes trimming it more time-consuming
-        self.cache_size = (self.window_x // tile_size + 1) * (self.window_y // tile_size + 1) * 16
+        self.cache_size = (self.window_x // tile_size + 1) * (self.window_y // tile_size + 1) * 8
         logger.info("Set cache size: %d." % self.cache_size)
 
     def setup_screen(self, fullscreen):
@@ -461,6 +466,8 @@ clickables = {
     'redraw': True,
     'mousedown': None,
     'rightmousedown': None,
+    'dragupdate': 0,
+    'dragstartime': 0,
     'text_hieght': 0,
     'queue_debug': {'in': 0, 'out': 0}
 }
@@ -492,19 +499,17 @@ lib.set_palette(palettes[drawing_params.last().palette_idx], len(palettes[drawin
 
 
 
-class Worker():
+def start_worker_render_threads():
     """
-    A class to run in a background thread in which tiles are rendered.
+    Start worker threads to render tiles (using the C computational kernel).
     """
-    def __init__(self):
-        self.t = None
 
-    def inner_work(self):
+    def worker_render_thread():
         """
         The entry point for the thread.
         """
             
-        logger.info("Thread starting.")
+        logger.info("Worker thread running.")
 
         try:
             while clickables['run']:
@@ -519,15 +524,13 @@ class Worker():
             logger.error("Exception in worker thread.")
             logger.error(err,exc_info=True)
 
-        logger.info("Thread stopping.")
+        logger.info("Worker thread stopping.")
 
-    def start(self):
-        self.t = threading.Thread(target=self.inner_work)
-        self.t.daemon = True
-        self.t.start()
-
-    def alive(self):
-        return self.t.isAlive()
+    # spawn up to 16 threads (threads do not scale forever, you could parallelize better with larger tiles)
+    for _ in range(min(16,cpu_count())):
+        t = threading.Thread(target=worker_render_thread)
+        t.daemon = True
+        t.start()
     
 
 
@@ -647,6 +650,7 @@ def draw_text_labels():
     def switch_colors(coord):
         if not switch_colors_rect.collidepoint(coord): return False
         clickables['redraw'] = True
+        tile_cache.clear()   # contains wrong colors
         palette_idx = drawing_params.last().palette_idx + 1
         if palette_idx >= len(palettes): palette_idx = 0
         drawing_params.add(palette_idx=palette_idx)
@@ -691,13 +695,16 @@ def handle_mouse_button_up(clickboxes):
     else:
         dragged = False
     if not dragged:
-        newcoord = screencoord_to_simcoord(mousecoord, clickboxes)
-        if newcoord:
-            simx,simy = newcoord
-            clickables['redraw'] = True
-            drawing_params.add(coord_x = simx, coord_y = simy)
+        if time() - clickables['dragupdate'] > 1/16:
+            newcoord = screencoord_to_simcoord(mousecoord, clickboxes)
+            if newcoord:
+                simx,simy = newcoord
+                clickables['redraw'] = True
+                drawing_params.add(coord_x = simx, coord_y = simy)
+            else:
+                logger.info("Mouse click on button.")
         else:
-            logger.info("Mouse click on button.")
+            logger.info("Skip zoom because there was a recent drag.")
     else:
         logger.info("Mouse drag.")
         drag_px = mousecoord[0] - clickables['mousedown'][0]   # positive means dragging right
@@ -780,10 +787,21 @@ def handle_input():
                 drawing_params.add(zoomlevel = drawing_params.last().zoomlevel + amount)
                 clickables['redraw'] = True
                 logger.info("Zoom in.")
+            elif event.key == pygame.K_UP:
+                pass
+            elif event.key == pygame.K_DOWN:
+                pass
+            elif event.key == pygame.K_LEFT:
+                pass
+            elif event.key == pygame.K_RIGHT:
+                pass
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == pygame.BUTTON_LEFT: key = 'mousedown'
-            elif event.button == pygame.BUTTON_RIGHT: key = 'rightmousedown'
-            clickables[key] = pygame.mouse.get_pos()
+            posnow = pygame.mouse.get_pos()
+            if event.button == pygame.BUTTON_LEFT:
+                clickables['mousedown'] = posnow
+                clickables['dragstarttime'] = time()
+            elif event.button == pygame.BUTTON_RIGHT:
+                clickables['rightmousedown'] = posnow
         elif event.type == pygame.MOUSEBUTTONUP:
             if event.button == pygame.BUTTON_LEFT:
                 handle_mouse_button_up(clickboxes)
@@ -793,6 +811,22 @@ def handle_input():
             logger.info("Window resize/sizechanged event.")
             screenstuff.refresh()
             clickables['redraw'] = True
+
+    if clickables['mousedown']:
+        posnow = pygame.mouse.get_pos()
+        if posnow != clickables['mousedown'] and time() - clickables['dragstarttime'] > 1/32:
+            clickables['dragstarttime'] = time()
+            clickables['redraw'] = True
+            clickables['dragupdate'] = time()
+            window_x, window_y = screenstuff.window_dims()
+            drag_px = posnow[0] - clickables['mousedown'][0]   # positive means dragging right
+            drag_py = posnow[1] - clickables['mousedown'][1]   # positive means dragging down
+            drpa = drawing_params.last()
+            drpa.set_coord(
+                coord_x = drpa.coord_x - drpa.coordrange_x * drag_px / window_x,
+                coord_y = drpa.coord_y - drpa.coordrange_y() * drag_py / window_y
+            )
+            clickables['mousedown'] = posnow
 
     # handle autozoom
     if clickables['autozoom'] and (not clickables['work_remains']) and (not clickables['maxzoomed']):
@@ -881,11 +915,9 @@ def handle_tiles():
 
 
 def main():
-    # run until the user asks to quit
-    for _ in range(min(16,cpu_count())):   # spawn up to 16 threads (threads do not scale forever, you could parallelize better with larger tiles)
-        w = Worker()
-        w.start()
+    start_worker_render_threads()
 
+    # run until the user asks to quit
     while clickables['run']:
         t1 = time()
         handle_tiles()
