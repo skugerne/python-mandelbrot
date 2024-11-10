@@ -466,7 +466,7 @@ clickables = {
     'redraw': True,
     'mousedown': None,
     'rightmousedown': None,
-    'dragupdate': 0,
+    'dragto': None,
     'dragstartime': 0,
     'text_hieght': 0,
     'queue_debug': {'in': 0, 'out': 0}
@@ -650,7 +650,7 @@ def draw_text_labels():
     def switch_colors(coord):
         if not switch_colors_rect.collidepoint(coord): return False
         clickables['redraw'] = True
-        tile_cache.clear()   # contains wrong colors
+        tile_cache.clear()   # cache contains wrong colors (does not flush tiles in certain processing stages)
         palette_idx = drawing_params.last().palette_idx + 1
         if palette_idx >= len(palettes): palette_idx = 0
         drawing_params.add(palette_idx=palette_idx)
@@ -679,6 +679,32 @@ def screencoord_to_simcoord(coord, clickboxes=None):
     simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/screenstuff.window_x
     simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/screenstuff.window_y
     return simx,simy
+
+
+
+def update_after_mouse_drag(mousecoord):
+    clickables['dragstarttime'] = time()
+    clickables['redraw'] = True
+    clickables['dragto'] = mousecoord
+    window_x, window_y = screenstuff.window_dims()
+    drag_px = mousecoord[0] - clickables['mousedown'][0]   # positive means dragging right
+    drag_py = mousecoord[1] - clickables['mousedown'][1]   # positive means dragging down
+    drpa = drawing_params.last()
+    drpa.set_coord(
+        coord_x = drpa.coord_x - drpa.coordrange_x * drag_px / window_x,
+        coord_y = drpa.coord_y - drpa.coordrange_y() * drag_py / window_y
+    )
+    clickables['mousedown'] = mousecoord
+
+
+
+def handle_mouse_drag():
+    if not clickables['mousedown']:
+        return
+    
+    mousecoord = pygame.mouse.get_pos()
+    if mousecoord != clickables['mousedown'] and time() - clickables['dragstarttime'] > 1/32:
+        update_after_mouse_drag(mousecoord)
     
 
 
@@ -689,32 +715,29 @@ def handle_mouse_button_up(clickboxes):
 
     window_x, window_y = screenstuff.window_dims()
     mousecoord = pygame.mouse.get_pos()
+
+    # if we dragged to where we are now, then our work is already done
+    if clickables['dragto'] == mousecoord:
+        clickables['mousedown'] = None
+        clickables['dragto'] = None
+        return
+
     if clickables['mousedown']:
         d = abs(mousecoord[0]-clickables['mousedown'][0]) + abs(mousecoord[1]-clickables['mousedown'][1])
         dragged = bool(d > 2)
     else:
         dragged = False
-    if not dragged:
-        if time() - clickables['dragupdate'] > 1/16:
-            newcoord = screencoord_to_simcoord(mousecoord, clickboxes)
-            if newcoord:
-                simx,simy = newcoord
-                clickables['redraw'] = True
-                drawing_params.add(coord_x = simx, coord_y = simy)
-            else:
-                logger.info("Mouse click on button.")
-        else:
-            logger.info("Skip zoom because there was a recent drag.")
-    else:
+    if dragged:
         logger.info("Mouse drag.")
-        drag_px = mousecoord[0] - clickables['mousedown'][0]   # positive means dragging right
-        drag_py = mousecoord[1] - clickables['mousedown'][1]   # positive means dragging down
-        clickables['redraw'] = True
-        drpa = drawing_params.last()
-        drawing_params.add(
-            coord_x = drpa.coord_x - drpa.coordrange_x * drag_px / window_x,
-            coord_y = drpa.coord_y - drpa.coordrange_y() * drag_py / window_y
-        )
+        update_after_mouse_drag(mousecoord)
+    else:
+        newcoord = screencoord_to_simcoord(mousecoord, clickboxes)
+        if newcoord:
+            simx,simy = newcoord
+            clickables['redraw'] = True
+            drawing_params.add(coord_x = simx, coord_y = simy)
+        else:
+            logger.info("Mouse click on button.")
 
     clickables['mousedown'] = None
 
@@ -812,21 +835,7 @@ def handle_input():
             screenstuff.refresh()
             clickables['redraw'] = True
 
-    if clickables['mousedown']:
-        posnow = pygame.mouse.get_pos()
-        if posnow != clickables['mousedown'] and time() - clickables['dragstarttime'] > 1/32:
-            clickables['dragstarttime'] = time()
-            clickables['redraw'] = True
-            clickables['dragupdate'] = time()
-            window_x, window_y = screenstuff.window_dims()
-            drag_px = posnow[0] - clickables['mousedown'][0]   # positive means dragging right
-            drag_py = posnow[1] - clickables['mousedown'][1]   # positive means dragging down
-            drpa = drawing_params.last()
-            drpa.set_coord(
-                coord_x = drpa.coord_x - drpa.coordrange_x * drag_px / window_x,
-                coord_y = drpa.coord_y - drpa.coordrange_y() * drag_py / window_y
-            )
-            clickables['mousedown'] = posnow
+    handle_mouse_drag()
 
     # handle autozoom
     if clickables['autozoom'] and (not clickables['work_remains']) and (not clickables['maxzoomed']):
