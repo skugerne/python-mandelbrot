@@ -34,6 +34,24 @@ minimum_fractalspace_coord = (-2, -2)
 
 tile_cache = {}              # WorkUnit objects indexed by tuples (zoom,row,col,simcoord_per_tile)
 
+# a global, containing properties which can be edited and shared between threads
+# would be a bit cleaner to make it an object
+clickables = {
+    'run': True,
+    'fullscreen': False,
+    'work_remains': 0,
+    'num_visible_tiles': 0,
+    'autozoom': True,
+    'maxzoomed': False,
+    'redraw': True,
+    'mousedown': None,
+    'rightmousedown': None,
+    'dragto': None,
+    'dragstartime': 0,
+    'text_hieght': 0,
+    'queue_debug': {'in': 0, 'out': 0}
+}
+
 
 
 def zoom_level_to_screen_w(l):
@@ -105,6 +123,9 @@ class DrawingParamsHistory():
             d = DrawingParams(coord_x, coord_y, zoomlevel, palette_idx)
         self.param_history.append(d)
         self.current_idx = len(self.param_history)-1
+
+        clickables['redraw'] = True
+
         return d
     
     def back(self):
@@ -127,6 +148,8 @@ class DrawingParamsHistory():
             self.add()
         else:
             clickables['maxzoomed'] = False
+
+        clickables['redraw'] = True
 
         # return that
         return self.last()
@@ -166,9 +189,7 @@ class DrawingParams():
         Return coordinate per pixel as shown on screen (depends on current screen res).
         """
         window_x, _ = screenstuff.window_dims()
-        res = self.coordrange_x / window_x
-        logger.debug("pixel size %s" % res)
-        return res
+        return self.coordrange_x / window_x
     
     def max_zoomed(self):
         """
@@ -334,6 +355,8 @@ class ScreenStuff():
         if drawing_params.last().max_zoomed():
             drawing_params.add()
 
+        clickables['redraw'] = True
+
     def setup_screen(self, fullscreen):
         """
         Enter or leave full screen mode.
@@ -483,24 +506,6 @@ pygame.display.set_caption('Mandelbrot')
 font = pygame.font.Font(pygame.font.get_default_font(), 14)
 textcache = dict()
 
-# a global, containing properties which can be edited and shared between threads
-# would be a bit cleaner to make it an object
-clickables = {
-    'run': True,
-    'fullscreen': False,
-    'work_remains': 0,
-    'num_visible_tiles': 0,
-    'autozoom': True,
-    'maxzoomed': False,
-    'redraw': True,
-    'mousedown': None,
-    'rightmousedown': None,
-    'dragto': None,
-    'dragstartime': 0,
-    'text_hieght': 0,
-    'queue_debug': {'in': 0, 'out': 0}
-}
-
 def zap(x):
     return ((x//4)%256,x//2%128,x%256)
 
@@ -635,7 +640,6 @@ def draw_text_labels():
         if not fullscreen_rect.collidepoint(coord): return False
         clickables['fullscreen'] = not clickables['fullscreen']
         screenstuff.setup_screen(clickables['fullscreen'])
-        clickables['redraw'] = True
         return True
     clickboxes.append(toggle_fullscreen)
     draw_button_box(mouse_coord, fullscreen_rect)
@@ -759,7 +763,6 @@ def handle_mouse_button_up(clickboxes):
         newcoord = screencoord_to_simcoord(mousecoord, clickboxes)
         if newcoord:
             simx,simy = newcoord
-            clickables['redraw'] = True
             drawing_params.add(coord_x = simx, coord_y = simy)
         else:
             logger.info("Mouse click on button.")
@@ -793,8 +796,6 @@ def handle_right_mouse_button_up():
         zoomlevel    = screen_w_to_zoom_level(abs(simx1 - simx2))
     )
 
-    clickables['redraw'] = True
-
 
 
 def handle_input():
@@ -817,40 +818,32 @@ def handle_input():
                 logger.info("Keyboard quit.")
             elif event.key in (pygame.K_DELETE,pygame.K_BACKSPACE):
                 drawing_params.back()
-                clickables['redraw'] = True
                 logger.info("Backwards in history.")
             elif event.key == pygame.K_f:                                                   # F for fullscreen toggle
                 clickables['fullscreen'] = not clickables['fullscreen']
                 screenstuff.setup_screen(clickables['fullscreen'])
-                clickables['redraw'] = True
             elif event.key in (pygame.K_MINUS,pygame.K_KP_MINUS):
                 keys = pygame.key.get_pressed()
                 amount = 5 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 1
                 drawing_params.add(zoomlevel = drawing_params.last().zoomlevel - amount)
-                clickables['redraw'] = True
                 logger.info("Zoom out.")
             elif event.key in (pygame.K_PLUS,pygame.K_KP_PLUS,pygame.K_RETURN,pygame.K_KP_ENTER):
                 keys = pygame.key.get_pressed()
                 amount = 5 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 1
                 drawing_params.add(zoomlevel = drawing_params.last().zoomlevel + amount)
-                clickables['redraw'] = True
                 logger.info("Zoom in.")
             elif event.key == pygame.K_UP:
                 drpa = drawing_params.last()
                 drawing_params.add(coord_y = (drpa.coord_y - drpa.coordrange_y() / 8))
-                clickables['redraw'] = True
             elif event.key == pygame.K_DOWN:
                 drpa = drawing_params.last()
                 drawing_params.add(coord_y = (drpa.coord_y + drpa.coordrange_y() / 8))
-                clickables['redraw'] = True
             elif event.key == pygame.K_LEFT:
                 drpa = drawing_params.last()
                 drawing_params.add(coord_x = (drpa.coord_x - drpa.coordrange_x / 8))
-                clickables['redraw'] = True
             elif event.key == pygame.K_RIGHT:
                 drpa = drawing_params.last()
                 drawing_params.add(coord_x = (drpa.coord_x + drpa.coordrange_x / 8))
-                clickables['redraw'] = True
         elif event.type == pygame.MOUSEBUTTONDOWN:
             posnow = pygame.mouse.get_pos()
             if event.button == pygame.BUTTON_LEFT:
@@ -866,7 +859,6 @@ def handle_input():
         elif event.type == pygame.VIDEORESIZE:
             logger.info("Window resize/sizechanged event.")
             screenstuff.refresh()
-            clickables['redraw'] = True
 
     handle_mouse_drag()
 
@@ -874,7 +866,6 @@ def handle_input():
     if clickables['autozoom'] and (not clickables['work_remains']) and (not clickables['maxzoomed']):
         logger.info("Autozoom.")
         drawing_params.add(zoomlevel = drawing_params.last().zoomlevel + 1)
-        clickables['redraw'] = True
 
     if clickables['redraw']:
         screenstuff.clear()
