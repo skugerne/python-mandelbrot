@@ -72,11 +72,9 @@ class DrawingParamsHistory():
             )
         ]
         self.current_idx = 0
-        self.lock = threading.RLock()
 
     def last(self):
-        with self.lock:
-            return self.param_history[self.current_idx]
+        return self.param_history[self.current_idx]
     
     def first(self):
         return self.param_history[0]
@@ -85,48 +83,53 @@ class DrawingParamsHistory():
         dparams = self.param_history[idx]
         if dparams.forgotten: return None
         return dparams
-    
-    def current_zoom(self):
-        """
-        Return how far we have zoomed in.
-        """
-        return 2.47 / self.last().coordrange_x
         
     def add(self, coord_x=None, coord_y=None, zoomlevel=None, palette_idx=None):
         """
         Add the specified drawing parameters to the stack.  We always add more, never delete.
         """
 
-        with self.lock:
-            p = self.last()
-            if coord_x == None:      coord_x = p.coord_x
-            if coord_y == None:      coord_y = p.coord_y
-            if zoomlevel == None:    zoomlevel = p.zoomlevel
-            if palette_idx == None:  palette_idx = p.palette_idx
-            if zoomlevel < 0:
-                zoomlevel = 0
+        p = self.last()
+        if coord_x == None:      coord_x = p.coord_x
+        if coord_y == None:      coord_y = p.coord_y
+        if zoomlevel == None:    zoomlevel = p.zoomlevel
+        if palette_idx == None:  palette_idx = p.palette_idx
+        if zoomlevel < 0:
+            zoomlevel = 0
+        d = DrawingParams(coord_x, coord_y, zoomlevel, palette_idx)
+        clickables['maxzoomed'] = False
+        while d.max_zoomed():
+            clickables['maxzoomed'] = True
+            clickables['autozoom'] = False
+            zoomlevel -= 1
             d = DrawingParams(coord_x, coord_y, zoomlevel, palette_idx)
-            self.param_history.append(d)
-            self.current_idx = len(self.param_history)-1
-            return d
+        self.param_history.append(d)
+        self.current_idx = len(self.param_history)-1
+        return d
     
     def back(self):
         """
         Go to an earlier set of drawing parameters.  We do not remove the one we are abandoning.
         """
-
-        with self.lock:
             
-            # disable where we are (as long as its not index 0)
+        # disable where we are (as long as its not index 0)
+        if self.current_idx:
+            self.param_history[self.current_idx].forgotten = True
+
+        # go backwards to find a not-disabled entry
+        while self.current_idx and self.param_history[self.current_idx].forgotten:
+            self.current_idx -= 1
+
+        # ensure we are not over-zoomed (probably by entering fullscreen when near or at the zoom limit)
+        if self.last().max_zoomed():
             if self.current_idx:
                 self.param_history[self.current_idx].forgotten = True
+            self.add()
+        else:
+            clickables['maxzoomed'] = False
 
-            # go backwards to find a not-disabled entry
-            while self.current_idx and self.param_history[self.current_idx].forgotten:
-                self.current_idx -= 1
-
-            # return that
-            return self.last()
+        # return that
+        return self.last()
 
 
 
@@ -151,6 +154,29 @@ class DrawingParams():
         self.coord_y      = coord_y     # center coord
         self.coordmin_x   = self.coord_x - self.coordrange_x/2
         self.coordmax_x   = self.coord_x + self.coordrange_x/2
+    
+    def zoom_factor(self):
+        """
+        Return how far we have zoomed in as a multiple.
+        """
+        return 2.47 / self.coordrange_x
+    
+    def pixel_size(self):
+        """
+        Return coordinate per pixel as shown on screen (depends on current screen res).
+        """
+        window_x, _ = screenstuff.window_dims()
+        res = self.coordrange_x / window_x
+        logger.debug("pixel size %s" % res)
+        return res
+    
+    def max_zoomed(self):
+        """
+        Return True if the the resolution if too fine to be rendered, False otherwise.
+        """
+        if not self.zoomlevel:
+            return False
+        return bool(self.pixel_size() < 1.62e-11)    # approximate limit, visual errors apparent starting around here
         
     def y_axis_properties(self):
         """
@@ -303,6 +329,10 @@ class ScreenStuff():
         # a larger cache size makes trimming it more time-consuming
         self.cache_size = (self.window_x // tile_size + 1) * (self.window_y // tile_size + 1) * 8
         logger.info("Set cache size: %d." % self.cache_size)
+
+        # ensure we are not over-zoomed (probably by entering fullscreen when near or at the zoom limit)
+        if drawing_params.last().max_zoomed():
+            drawing_params.add()
 
     def setup_screen(self, fullscreen):
         """
@@ -462,7 +492,6 @@ clickables = {
     'num_visible_tiles': 0,
     'autozoom': True,
     'maxzoomed': False,
-    'minzoomed': False,
     'redraw': True,
     'mousedown': None,
     'rightmousedown': None,
@@ -611,12 +640,8 @@ def draw_text_labels():
     clickboxes.append(toggle_fullscreen)
     draw_button_box(mouse_coord, fullscreen_rect)
 
-    zoom = drawing_params.current_zoom()
-    if zoom > 5*1000*1000*1000*1000:    # approximate limit, visual errors apparent starting around here
-        clickables['maxzoomed'] = True
-        clickables['autozoom'] = False
-    else:
-        clickables['maxzoomed'] = False
+    drpa = drawing_params.last()
+    zoom = drpa.zoom_factor()
     if zoom < 10000:
         text = 'zoom: %0.01f X' % zoom
     else:
@@ -625,7 +650,7 @@ def draw_text_labels():
     right_edge, _ = blit_text(text_surface, right_edge)
 
     # draw a count for how many items there are in history
-    text_surface = text_box('level: %d' % drawing_params.last().zoomlevel, textcolor, backgroundcolor)
+    text_surface = text_box('level: %d' % drpa.zoomlevel, textcolor, backgroundcolor)
     right_edge, _ = blit_text(text_surface, right_edge)
 
     if not clickables['maxzoomed']:
@@ -651,7 +676,7 @@ def draw_text_labels():
         if not switch_colors_rect.collidepoint(coord): return False
         clickables['redraw'] = True
         tile_cache.clear()   # cache contains wrong colors (does not flush tiles in certain processing stages)
-        palette_idx = drawing_params.last().palette_idx + 1
+        palette_idx = drpa.palette_idx + 1
         if palette_idx >= len(palettes): palette_idx = 0
         drawing_params.add(palette_idx=palette_idx)
         lib.set_palette(palettes[palette_idx], len(palettes[palette_idx])//3)   # point C at some binary stuff
