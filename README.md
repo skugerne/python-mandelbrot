@@ -24,4 +24,14 @@ Then you just run it: `python3 mandelbrot.py`
 
 ## controls
 
-There are some on-screen buttons, you can click to give a new center point, you can drag.  The space bar pauses, q or esc quits.
+There are some on-screen buttons.
+
+You can click to give a new center point, you can drag to move, you can right-drag to zoom to a box.
+
+Key shortcuts:
+* <kbd>space</kbd> toggles auto-zoom (defaults to on)
+* <kbd>q</kbd> or <kbd>esc</kbd> quits
+* <kbd>f</kbd> to toggle full screen (defaults to a modest window)
+* <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> to navigate
+* <kbd>enter</kbd> or <kbd>+</kbd> to zoom in, <kbd>-</kbd> to zoom out
+* <kbd>delete</kbd> to navigate backwards in history
