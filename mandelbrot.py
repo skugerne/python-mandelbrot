@@ -829,20 +829,28 @@ def handle_input():
                 drawing_params.add(zoomlevel = drawing_params.last().zoomlevel - amount)
                 clickables['redraw'] = True
                 logger.info("Zoom out.")
-            elif event.key in (pygame.K_PLUS,pygame.K_KP_PLUS):
+            elif event.key in (pygame.K_PLUS,pygame.K_KP_PLUS,pygame.K_RETURN,pygame.K_KP_ENTER):
                 keys = pygame.key.get_pressed()
                 amount = 5 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 1
                 drawing_params.add(zoomlevel = drawing_params.last().zoomlevel + amount)
                 clickables['redraw'] = True
                 logger.info("Zoom in.")
             elif event.key == pygame.K_UP:
-                pass
+                drpa = drawing_params.last()
+                drawing_params.add(coord_y = (drpa.coord_y - drpa.coordrange_y() / 8))
+                clickables['redraw'] = True
             elif event.key == pygame.K_DOWN:
-                pass
+                drpa = drawing_params.last()
+                drawing_params.add(coord_y = (drpa.coord_y + drpa.coordrange_y() / 8))
+                clickables['redraw'] = True
             elif event.key == pygame.K_LEFT:
-                pass
+                drpa = drawing_params.last()
+                drawing_params.add(coord_x = (drpa.coord_x - drpa.coordrange_x / 8))
+                clickables['redraw'] = True
             elif event.key == pygame.K_RIGHT:
-                pass
+                drpa = drawing_params.last()
+                drawing_params.add(coord_x = (drpa.coord_x + drpa.coordrange_x / 8))
+                clickables['redraw'] = True
         elif event.type == pygame.MOUSEBUTTONDOWN:
             posnow = pygame.mouse.get_pos()
             if event.button == pygame.BUTTON_LEFT:
