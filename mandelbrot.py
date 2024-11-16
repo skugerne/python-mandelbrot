@@ -1,4 +1,3 @@
-from cffi import FFI
 from time import time, sleep
 from math import log, floor
 from random import shuffle
@@ -7,22 +6,32 @@ from multiprocessing import cpu_count
 import pygame, threading
 import logging
 
+import cffi_compute
 
 
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
 
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
-logger.addHandler(console_handler)
+def setup_logger():
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
 
-file_handler = logging.FileHandler('run.log', mode='w', encoding='utf8')
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d - %(name)s - TH%(thread)d - %(levelname)s - %(message)s','%H:%M:%S'))
-logger.addHandler(file_handler)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+    logger.addHandler(console_handler)
+
+    file_handler = logging.FileHandler('run.log', mode='w', encoding='utf8')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d - %(name)s - TH%(thread)d - %(levelname)s - %(message)s','%H:%M:%S'))
+    logger.addHandler(file_handler)
+
+    return logger
 
 
+
+if __name__ == '__main__':
+    logger = setup_logger()
+else:
+    logger = logging.getLogger('mandelbrot')
 
 max_recursion = 4096         # maybe 2**16-1 eventually?
 tile_size = 32               # smaller tiles mean more thread and cache overhead, but are more efficient in black areas
@@ -52,6 +61,8 @@ clickables = {
     'queue_debug': {'in': 0, 'out': 0}
 }
 
+computelib = cffi_compute.compile_unrolled(tile_size, max_recursion, minimum_fractalspace_coord)
+
 
 
 def zoom_level_to_screen_w(l):
@@ -72,6 +83,22 @@ def screen_w_to_zoom_level(w):
     """
     ratio = 2.47 / w
     return int(log(ratio,zoom_step_inv) + 0.5)
+
+
+
+def screencoord_to_simcoord(coord, clickboxes=None):
+    """
+    Convert screen coordinates to calculation/simulation/fractalspace coordinates.
+    """
+    
+    if clickboxes:
+        for box in clickboxes:     # optionally ignore coords that fall in clickboxes
+            if box(coord):
+                return None
+    drpa = drawing_params.last()
+    simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/screenstuff.window_x
+    simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/screenstuff.window_y
+    return simx,simy
     
 
 
@@ -93,14 +120,6 @@ class DrawingParamsHistory():
 
     def last(self):
         return self.param_history[self.current_idx]
-    
-    def first(self):
-        return self.param_history[0]
-    
-    def get(self,idx):
-        dparams = self.param_history[idx]
-        if dparams.forgotten: return None
-        return dparams
         
     def add(self, coord_x=None, coord_y=None, zoomlevel=None, palette_idx=None):
         """
@@ -172,7 +191,7 @@ class DrawingParams():
         self.forgotten    = False                        # when we go back in history, we forget items, but leave them in place (could leave a None or something to save RAM)
 
     def set_coord(self,coord_x,coord_y):
-        logger.info("Center simcoord: %s, %s" % (coord_x,coord_y))
+        logger.debug("Center simcoord: %s, %s" % (coord_x,coord_y))
         self.coord_x      = coord_x     # center coord
         self.coord_y      = coord_y     # center coord
         self.coordmin_x   = self.coord_x - self.coordrange_x/2
@@ -264,8 +283,6 @@ class DrawingParams():
         """
         Show the given tile on the screen.  The upper left is (0,0).
         """
-        
-        #logger.info("Display a tile %s." % str(workunit.coord()))
 
         zoom_level, row, col, simcoord_per_tile = workunit.cache_key
         assert zoom_level == self.zoomlevel, "Somehow got the wrong zoom level."
@@ -279,12 +296,7 @@ class DrawingParams():
 
         screenstuff.screen.blit(workunit.data, (draw_x,draw_y))
 
-        #logger.info("row=%s, col=%s, tile_simx=%s, tile_simy=%s" % (row,col,tile_simx,tile_simy))
-        #logger.info("simcoord_per_pixel=%s, simcoord_per_pixel_2=%s" % (simcoord_per_pixel,simcoord_per_pixel_2))
-        #logger.info("draw_x=%s, draw_y=%s" % (draw_x,draw_y))
-
         
-    
 
 class WorkUnit():
     def __init__(self, cache_key):
@@ -300,10 +312,9 @@ class WorkUnit():
         """
 
         _, row, col, coord_per = self.cache_key
-        lib.compute_tile(self.data, row, col, coord_per)
+        computelib.compute_tile(self.data, row, col, coord_per)
         self.data = pygame.image.fromstring(self.data, (tile_size,tile_size), "RGB")
         self.processed = True
-        #logger.info("Tile %s rendered." % str(self.coord()))
 
     def coord(self):
         """
@@ -388,116 +399,6 @@ class ScreenStuff():
 
 
 
-# do some hacky inline C
-ffi = FFI()
-ffi.set_source("inlinehack", """
-#define TILE_SIZE """+str(tile_size)+"""
-#define MAX_RECURSION """+str(max_recursion)+"""
-#define MIN_FRACTACLSPACE_X """+str(minimum_fractalspace_coord[0])+"""
-#define MIN_FRACTACLSPACE_Y """+str(minimum_fractalspace_coord[1])+"""
-unsigned char *palette = NULL;       // RGB values for colors, 3 bytes per color
-int palette_color_count = 0;         // number of colors in palette
-
-void set_palette(unsigned char *data, int color_count){
-    palette = data;
-    palette_color_count = color_count;
-}
-
-int mandlebrot(double coord_x, double coord_y) {
-    double x2;
-    double x = 0.0;
-    double y = 0.0;
-    int count = 0;
-    while( x*x + y*y <= 4.0 && count < MAX_RECURSION ){
-        x2 = x*x - y*y + coord_x;
-        y = 2.0*x*y + coord_y;
-        x = x2;
-        count += 1;
-    }
-    return count;
-}
-
-void colorize(unsigned char* data, int pixel_idx, int iterations){
-    int pixel_addr = pixel_idx * 3;
-    int color_addr;
-    if( iterations == MAX_RECURSION ){
-        data[pixel_addr]   = 0;
-        data[pixel_addr+1] = 0;
-        data[pixel_addr+2] = 0;
-    }else{
-        if( iterations >= palette_color_count )
-            iterations %= palette_color_count;
-        color_addr = iterations * 3;
-        data[pixel_addr]   = palette[color_addr];
-        data[pixel_addr+1] = palette[color_addr+1];
-        data[pixel_addr+2] = palette[color_addr+2];
-    }
-}
-
-void compute_tile(unsigned char* data, unsigned int row, unsigned int col, double simcoord_per_tile) {
-    double coord_step = simcoord_per_tile / TILE_SIZE;
-    double start_coord_x = MIN_FRACTACLSPACE_X + col * simcoord_per_tile;
-    double start_coord_y = MIN_FRACTACLSPACE_Y + row * simcoord_per_tile;
-    double coord_x = start_coord_x;
-    double coord_y = start_coord_y;
-    double alt_coord = start_coord_x + simcoord_per_tile - coord_step;     /* start_coord_x + simcoord_per_tile is the next tile) */
-    int blacks = 0;
-    int iterations = 0;
-    for( int i=0; i<TILE_SIZE; ++i ){           /* calculate left & right edges */
-        iterations = mandlebrot(coord_x, coord_y);
-        colorize(data, i*TILE_SIZE, iterations);
-        if(iterations == MAX_RECURSION) blacks += 1;
-        iterations = mandlebrot(alt_coord, coord_y);
-        colorize(data, i*TILE_SIZE+TILE_SIZE-1, iterations);
-        if(iterations == MAX_RECURSION) blacks += 1;
-        coord_y += coord_step;
-    }
-    coord_x = start_coord_x;
-    coord_y = start_coord_y;
-    alt_coord = start_coord_y + simcoord_per_tile - coord_step;            /* start_coord_y + simcoord_per_tile is the next tile) */
-    for( int i=1; i<TILE_SIZE-1; ++i ){         /* calculate top & bottom edges */
-        coord_x += coord_step;
-        iterations = mandlebrot(coord_x, coord_y);
-        colorize(data, i, iterations);
-        if(iterations == MAX_RECURSION) blacks += 1;
-        iterations = mandlebrot(coord_x, alt_coord);
-        colorize(data, TILE_SIZE*(TILE_SIZE-1)+i, iterations);
-        if(iterations == MAX_RECURSION) blacks += 1;
-    }
-    if( blacks == 4*TILE_SIZE-4 ){              /* check for easy escape, big speedup inside the set */
-        for( int i=0; i<TILE_SIZE*TILE_SIZE*3; ++i )
-            data[i] = 0;                          /* return all black pixels */
-        return;
-    }
-    coord_x = start_coord_x;
-    for( int x=1; x<TILE_SIZE-1; ++x ){         /* fill in the middle */
-        coord_x += coord_step;
-        coord_y = start_coord_y;
-        for( int y=1; y<TILE_SIZE-1; ++y ){
-            coord_y += coord_step;
-            colorize(
-                data,
-                (x + y*TILE_SIZE),
-                mandlebrot(coord_x,coord_y)
-            );
-        }
-    }
-}
-""")
-ffi.cdef("""
-extern unsigned char *palette;          // RGB values for colors, 3 bytes per color
-extern int palette_color_count;         // number of colors in palette
-void set_palette(unsigned char *,int);
-long mandlebrot(double,double);
-void compute_tile(unsigned char *,double,double,double);
-""")
-logger.info("Compile...")
-ffi.compile()
-logger.info("Import...")
-from inlinehack import lib     # import the compiled library
-
-
-
 # start up the user interface
 pygame.init()
 drawing_params = DrawingParamsHistory()
@@ -522,14 +423,14 @@ def tobytes(x):
     return bytes(data)
 
 palettes = [
-    [zap(x) for x in range(max_recursion)],
     [(255,0,125),(255,0,255),(125,0,255),(0,0,255),(0,125,255),(0,255,255),(0,255,125),(0,255,0),(125,255,0),(255,255,0),(255,125,0),(255,0,0)],
+    [zap(x) for x in range(max_recursion)],
     [(255,0,0),(0,255,0),(0,0,255),(255,255,255)],
     [edge(x) for x in range(max_recursion)]           # mostly to identify cases where we run out of recursion
 ]
 palettes = [tobytes(x) for x in palettes]
 
-lib.set_palette(palettes[drawing_params.last().palette_idx], len(palettes[drawing_params.last().palette_idx])//3)   # point C at some binary stuff
+computelib.set_palette(palettes[drawing_params.last().palette_idx], len(palettes[drawing_params.last().palette_idx])//3)   # point C at some binary stuff
 
 
 
@@ -560,8 +461,10 @@ def start_worker_render_threads():
 
         logger.info("Worker thread stopping.")
 
-    # spawn up to 16 threads (threads do not scale forever, you could parallelize better with larger tiles)
-    for _ in range(min(16,cpu_count())):
+    # spawn threads according to how many CPUs (or SMT threads) are available
+    # threading with not scale forever, but larger tiles will have lower overhead
+    c = int(round(cpu_count() * 0.875))
+    for _ in range(min(32,c)):            # limit max threads to 32
         t = threading.Thread(target=worker_render_thread)
         t.daemon = True
         t.start()
@@ -683,7 +586,7 @@ def draw_text_labels():
         palette_idx = drpa.palette_idx + 1
         if palette_idx >= len(palettes): palette_idx = 0
         drawing_params.add(palette_idx=palette_idx)
-        lib.set_palette(palettes[palette_idx], len(palettes[palette_idx])//3)   # point C at some binary stuff
+        computelib.set_palette(palettes[palette_idx], len(palettes[palette_idx])//3)   # point C at some binary stuff
         return True
     clickboxes.append(switch_colors)
     draw_button_box(mouse_coord, switch_colors_rect)
@@ -693,21 +596,6 @@ def draw_text_labels():
     right_edge, _ = blit_text(text_surface, right_edge)
 
     return clickboxes
-
-
-
-def screencoord_to_simcoord(coord, clickboxes=None):
-    """
-    Convert screen coordinates to calculation/simulation/fractalspace coordinates.
-    """
-    if clickboxes:
-        for box in clickboxes:     # optionally ignore coords that fall in clickboxes
-            if box(coord):
-                return None
-    drpa = drawing_params.last()
-    simx = drpa.coordmin_x + drpa.coordrange_x * coord[0]/screenstuff.window_x
-    simy = drpa.coordmin_y() + drpa.coordrange_y() * coord[1]/screenstuff.window_y
-    return simx,simy
 
 
 
@@ -810,6 +698,7 @@ def handle_input():
         if event.type == pygame.QUIT:
             clickables['run'] = False
         elif event.type == pygame.KEYDOWN:
+            drpa = drawing_params.last()
             if event.key == pygame.K_SPACE:                                                 # space to toggle autozoom
                 clickables['autozoom'] = not clickables['autozoom']
                 logger.info("Set autozoom to: %s" % str(clickables['autozoom']))
@@ -825,24 +714,24 @@ def handle_input():
             elif event.key in (pygame.K_MINUS,pygame.K_KP_MINUS):
                 keys = pygame.key.get_pressed()
                 amount = 5 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 1
-                drawing_params.add(zoomlevel = drawing_params.last().zoomlevel - amount)
+                drawing_params.add(zoomlevel = drpa.zoomlevel - amount)
                 logger.info("Zoom out.")
             elif event.key in (pygame.K_PLUS,pygame.K_KP_PLUS,pygame.K_RETURN,pygame.K_KP_ENTER):
                 keys = pygame.key.get_pressed()
                 amount = 5 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 1
-                drawing_params.add(zoomlevel = drawing_params.last().zoomlevel + amount)
+                drawing_params.add(zoomlevel = drpa.zoomlevel + amount)
                 logger.info("Zoom in.")
             elif event.key == pygame.K_UP:
-                drpa = drawing_params.last()
+                logger.info("Pan up.")
                 drawing_params.add(coord_y = (drpa.coord_y - drpa.coordrange_y() / 8))
             elif event.key == pygame.K_DOWN:
-                drpa = drawing_params.last()
+                logger.info("Pan down.")
                 drawing_params.add(coord_y = (drpa.coord_y + drpa.coordrange_y() / 8))
             elif event.key == pygame.K_LEFT:
-                drpa = drawing_params.last()
+                logger.info("Pan left.")
                 drawing_params.add(coord_x = (drpa.coord_x - drpa.coordrange_x / 8))
             elif event.key == pygame.K_RIGHT:
-                drpa = drawing_params.last()
+                logger.info("Pan right.")
                 drawing_params.add(coord_x = (drpa.coord_x + drpa.coordrange_x / 8))
         elif event.type == pygame.MOUSEBUTTONDOWN:
             posnow = pygame.mouse.get_pos()
@@ -911,7 +800,7 @@ def handle_tiles():
     # clean up excessive cached images
     if time() < timeout and len(tile_cache) > screenstuff.cache_size:
         how_many = max(1,(len(tile_cache) - screenstuff.cache_size)//8)
-        logger.info("Trim %d items from cache." % how_many)
+        logger.debug("Trim %d items from cache." % how_many)
         workunits = sorted(tile_cache.values(), key=lambda x: x.used)
         while how_many:
             how_many -= 1
@@ -961,4 +850,8 @@ def main():
     
     pygame.quit()
 
-main()
+
+
+# support including this file as a library (i.e. including it, but not executing it)
+if __name__ == '__main__':
+    main()
