@@ -46,6 +46,7 @@ tile_cache = {}              # WorkUnit objects indexed by tuples (zoom,row,col,
 # a global, containing properties which can be edited and shared between threads
 # would be a bit cleaner to make it an object
 clickables = {
+    'palette_idx': 0,
     'run': True,
     'fullscreen': False,
     'work_remains': 0,
@@ -112,8 +113,7 @@ class DrawingParamsHistory():
             DrawingParams(
                 coord_x      = (0.47 - 2.00)/2,
                 coord_y      = 0,
-                zoomlevel    = 0,
-                palette_idx  = 0
+                zoomlevel    = 0
             )
         ]
         self.current_idx = 0
@@ -121,7 +121,7 @@ class DrawingParamsHistory():
     def last(self):
         return self.param_history[self.current_idx]
         
-    def add(self, coord_x=None, coord_y=None, zoomlevel=None, palette_idx=None):
+    def add(self, coord_x=None, coord_y=None, zoomlevel=None):
         """
         Add the specified drawing parameters to the stack.  We always add more, never delete.
         """
@@ -130,16 +130,15 @@ class DrawingParamsHistory():
         if coord_x == None:      coord_x = p.coord_x
         if coord_y == None:      coord_y = p.coord_y
         if zoomlevel == None:    zoomlevel = p.zoomlevel
-        if palette_idx == None:  palette_idx = p.palette_idx
         if zoomlevel < 0:
             zoomlevel = 0
-        d = DrawingParams(coord_x, coord_y, zoomlevel, palette_idx)
+        d = DrawingParams(coord_x, coord_y, zoomlevel)
         clickables['maxzoomed'] = False
         while d.max_zoomed():
             clickables['maxzoomed'] = True
             clickables['autozoom'] = False
             zoomlevel -= 1
-            d = DrawingParams(coord_x, coord_y, zoomlevel, palette_idx)
+            d = DrawingParams(coord_x, coord_y, zoomlevel)
         self.param_history.append(d)
         self.current_idx = len(self.param_history)-1
 
@@ -182,12 +181,11 @@ class DrawingParams():
     Note that Y-axis values and row/col coords are not included, as they depend on display width and/or ratio, which can change.
     """
 
-    def __init__(self, coord_x, coord_y, zoomlevel, palette_idx):
+    def __init__(self, coord_x, coord_y, zoomlevel):
         # the coordinates below are calculation/simulation/fractalspace coordinates, not screen coordinates
         self.zoomlevel    = zoomlevel
         self.coordrange_x = zoom_level_to_screen_w(zoomlevel)
         self.set_coord(coord_x,coord_y)
-        self.palette_idx  = palette_idx
         self.forgotten    = False                        # when we go back in history, we forget items, but leave them in place (could leave a None or something to save RAM)
 
     def set_coord(self,coord_x,coord_y):
@@ -294,14 +292,18 @@ class DrawingParams():
         draw_x = (tile_simx - self.coordmin_x) / simcoord_per_pixel
         draw_y = (tile_simy - self.coordmin_y()) / simcoord_per_pixel
 
-        screenstuff.screen.blit(workunit.data, (draw_x,draw_y))
+        if workunit.palette_idx != clickables['palette_idx']:
+            workunit.recolor(clickables['palette_idx'])
+        screenstuff.screen.blit(workunit.color_data, (draw_x,draw_y))
 
         
 
 class WorkUnit():
     def __init__(self, cache_key):
         self.cache_key = cache_key                   # tuple (zoom,row,col,simcoord_per_tile)
-        self.data = b"0" * (tile_size*tile_size*3)   # store binary pixel data of result here, then replace with a Pygame Surface (TODO: store uncolored data)
+        self.depth_data = b"0" * (tile_size*tile_size*2)   # store depth data of result here
+        self.color_data = None
+        self.palette_idx = None
         self.used = time()
         self.processed = False  # becomes True when data is processed
         self.resolved = False   # becomes True when data has reached main thread
@@ -312,8 +314,20 @@ class WorkUnit():
         """
 
         _, row, col, coord_per = self.cache_key
-        computelib.compute_tile(self.data, row, col, coord_per)
-        self.data = pygame.image.fromstring(self.data, (tile_size,tile_size), "RGB")
+        computelib.compute_tile(self.depth_data, row, col, coord_per)
+        self.recolor(clickables['palette_idx'])
+
+    def recolor(self, palette_idx):
+        """
+        Convert the pixel depth data into a pygame surface.  Not useful to call before compute() has run.
+        """
+
+        self.palette_idx = palette_idx
+        palette_data = palettes[self.palette_idx]
+        palette_data_len = len(palette_data)//3
+        self.color_data = b"0" * (tile_size*tile_size*3)   # store binary pixel data, replaced by a pygame surface
+        computelib.colorize_tile(self.depth_data, self.color_data, palette_data, palette_data_len)
+        self.color_data = pygame.image.fromstring(self.color_data, (tile_size,tile_size), "RGB")
         self.processed = True
 
     def coord(self):
@@ -423,14 +437,12 @@ def tobytes(x):
     return bytes(data)
 
 palettes = [
-    [(255,0,125),(255,0,255),(125,0,255),(0,0,255),(0,125,255),(0,255,255),(0,255,125),(0,255,0),(125,255,0),(255,255,0),(255,125,0),(255,0,0)],
     [zap(x) for x in range(max_recursion)],
+    [(255,0,125),(255,0,255),(125,0,255),(0,0,255),(0,125,255),(0,255,255),(0,255,125),(0,255,0),(125,255,0),(255,255,0),(255,125,0),(255,0,0)],
     [(255,0,0),(0,255,0),(0,0,255),(255,255,255)],
     [edge(x) for x in range(max_recursion)]           # mostly to identify cases where we run out of recursion
 ]
-palettes = [tobytes(x) for x in palettes]
-
-computelib.set_palette(palettes[drawing_params.last().palette_idx], len(palettes[drawing_params.last().palette_idx])//3)   # point C at some binary stuff
+palettes = [tobytes(x) for x in palettes]             # this results in one long byte string
 
 
 
@@ -582,11 +594,8 @@ def draw_text_labels():
     def switch_colors(coord):
         if not switch_colors_rect.collidepoint(coord): return False
         clickables['redraw'] = True
-        tile_cache.clear()   # cache contains wrong colors (does not flush tiles in certain processing stages)
-        palette_idx = drpa.palette_idx + 1
-        if palette_idx >= len(palettes): palette_idx = 0
-        drawing_params.add(palette_idx=palette_idx)
-        computelib.set_palette(palettes[palette_idx], len(palettes[palette_idx])//3)   # point C at some binary stuff
+        clickables['palette_idx'] += 1
+        if clickables['palette_idx'] >= len(palettes): clickables['palette_idx'] = 0
         return True
     clickboxes.append(switch_colors)
     draw_button_box(mouse_coord, switch_colors_rect)
