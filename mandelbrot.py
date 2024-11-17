@@ -214,7 +214,7 @@ class DrawingParams():
         """
         if not self.zoomlevel:
             return False
-        return bool(self.pixel_size() < 1.62e-11)    # approximate limit, visual errors apparent starting around here
+        return bool(self.pixel_size() < 6.0e-17)    # approximate limit, visual errors apparent starting around here
         
     def y_axis_properties(self):
         """

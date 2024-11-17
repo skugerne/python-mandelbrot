@@ -75,17 +75,15 @@ def compile_simple(tile_size, max_recursion, minimum_fractalspace_coord):
     }
 
     void compute_tile(unsigned char* data, long long row, long long col, double simcoord_per_tile) {
-        double coord_step = simcoord_per_tile / TILE_SIZE;
         double start_coord_x = MIN_FRACTACLSPACE_X + col * simcoord_per_tile;
         double start_coord_y = MIN_FRACTACLSPACE_Y + row * simcoord_per_tile;
+        double coord_x;
         double coord_y;
         int iterations;
-        double coord_x = start_coord_x;
         for( int x=0; x<TILE_SIZE; ++x ){
-            coord_x += coord_step;
-            coord_y = start_coord_y;
+            coord_x = start_coord_x + x * simcoord_per_tile / TILE_SIZE;
             for( int y=0; y<TILE_SIZE; ++y ){
-                coord_y += coord_step;
+                coord_y = start_coord_y + y * simcoord_per_tile / TILE_SIZE;
                 iterations = mandlebrot(coord_x, coord_y);
                 store(data,(x + y*TILE_SIZE),iterations);  /* data[x + y*TILE_SIZE] = iterations */
             }
@@ -122,6 +120,9 @@ def compile(tile_size, max_recursion, minimum_fractalspace_coord):
     /* fun treacherous macros to write 16-bit values in a byte array, blame CFFI for not liking arrays of shorts */
     #define STORE(dat, idx, val) dat[idx*2] = ((val & 0xFF00) >> 8); dat[idx*2+1] = (val & 0xFF)
     #define LOAD(dat, idx) (dat[idx*2] << 8) + dat[idx*2+1]
+
+    /* slightly-hostile macro to cut code duplication */
+    #define SIMCOORD(start, i) start + (i) * simcoord_per_tile / TILE_SIZE
 
     void colorize_tile(unsigned char* pixel_depth, unsigned char* pixel_color,  unsigned char* palette_color, int palette_color_len){
         int pixel_depth_idx;
@@ -163,47 +164,46 @@ def compile(tile_size, max_recursion, minimum_fractalspace_coord):
     }
 
     void compute_tile(unsigned char* data, long long row, long long col, double simcoord_per_tile) {
-        double coord_step = simcoord_per_tile / TILE_SIZE;
         double start_coord_x = MIN_FRACTACLSPACE_X + col * simcoord_per_tile;
         double start_coord_y = MIN_FRACTACLSPACE_Y + row * simcoord_per_tile;
-        double coord_x = start_coord_x;
-        double coord_y = start_coord_y;
-        double alt_coord = start_coord_x + simcoord_per_tile - coord_step;     /* start_coord_x + simcoord_per_tile is the next tile) */
-        int blacks = 0;
-        int iterations = 0;
-        for( int i=0; i<TILE_SIZE; ++i ){                        /* calculate left & right edges */
-            iterations = mandlebrot(coord_x, coord_y);
-            STORE(data,(i*TILE_SIZE),iterations);                /* data[i*TILE_SIZE] = iterations */
-            if(iterations == MAX_RECURSION) blacks += 1;
-            iterations = mandlebrot(alt_coord, coord_y);
-            STORE(data,(i*TILE_SIZE+TILE_SIZE-1),iterations);    /* data[i*TILE_SIZE+TILE_SIZE-1] = iterations */
-            if(iterations == MAX_RECURSION) blacks += 1;
-            coord_y += coord_step;
-        }
+        double coord_x;
+        double coord_y;
+        double alt_coord;
+        int iterations;
+        int prelimit = 0;                                        /* track edge pixels that do not reach MAX_RECURSION */
+
         coord_x = start_coord_x;
-        coord_y = start_coord_y;
-        alt_coord = start_coord_y + simcoord_per_tile - coord_step;            /* start_coord_y + simcoord_per_tile is the next tile) */
-        for( int i=1; i<TILE_SIZE-1; ++i ){                      /* calculate top & bottom edges */
-            coord_x += coord_step;
+        alt_coord = SIMCOORD(start_coord_x,TILE_SIZE-1);
+        for( int y=0; y<TILE_SIZE; ++y ){                        /* calculate left & right edges */
+            coord_y = SIMCOORD(start_coord_y,y);
             iterations = mandlebrot(coord_x, coord_y);
-            STORE(data,i,iterations);                            /* data[i] = iterations */
-            if(iterations == MAX_RECURSION) blacks += 1;
-            iterations = mandlebrot(coord_x, alt_coord);
-            STORE(data,(TILE_SIZE*(TILE_SIZE-1)+i),iterations);  /* data[TILE_SIZE*(TILE_SIZE-1)+i] = iterations */
-            if(iterations == MAX_RECURSION) blacks += 1;
+            STORE(data,(y*TILE_SIZE),iterations);                /* data[y*TILE_SIZE] = iterations */
+            if(iterations != MAX_RECURSION) prelimit = 1;
+            iterations = mandlebrot(alt_coord, coord_y);
+            STORE(data,(y*TILE_SIZE+TILE_SIZE-1),iterations);    /* data[y*TILE_SIZE+TILE_SIZE-1] = iterations */
+            if(iterations != MAX_RECURSION) prelimit = 1;
         }
-        if( blacks == 4*TILE_SIZE-4 ){                           /* check for easy escape, big speedup inside the set */
+        coord_y = start_coord_y;
+        alt_coord = SIMCOORD(start_coord_y,TILE_SIZE-1);
+        for( int x=1; x<TILE_SIZE-1; ++x ){                      /* calculate top & bottom edges */
+            coord_x = SIMCOORD(start_coord_x,x);
+            iterations = mandlebrot(coord_x, coord_y);
+            STORE(data,x,iterations);                            /* data[x] = iterations */
+            if(iterations != MAX_RECURSION) prelimit = 1;
+            iterations = mandlebrot(coord_x, alt_coord);
+            STORE(data,(TILE_SIZE*(TILE_SIZE-1)+x),iterations);  /* data[TILE_SIZE*(TILE_SIZE-1)+x] = iterations */
+            if(iterations != MAX_RECURSION) prelimit = 1;
+        }
+        if( prelimit == 0 ){                                     /* check for easy escape, big speedup inside the set */
             for( int i=0; i<TILE_SIZE*TILE_SIZE; ++i ){
                 STORE(data,i,MAX_RECURSION);                     /* return all max-iteration "black" pixels */
             }
             return;
         }
-        coord_x = start_coord_x;
         for( int x=1; x<TILE_SIZE-1; ++x ){                      /* fill in the middle */
-            coord_x += coord_step;
-            coord_y = start_coord_y;
+            coord_x = SIMCOORD(start_coord_x,x);
             for( int y=1; y<TILE_SIZE-1; ++y ){
-                coord_y += coord_step;
+                coord_y = SIMCOORD(start_coord_y,y);
                 iterations = mandlebrot(coord_x, coord_y);
                 STORE(data,(x + y*TILE_SIZE),iterations);        /* data[x + y*TILE_SIZE] = iterations */
             }
@@ -240,6 +240,9 @@ def compile_unrolled(tile_size, max_recursion, minimum_fractalspace_coord):
     /* fun treacherous macros to write 16-bit values in a byte array, blame CFFI for not liking arrays of shorts */
     #define STORE(dat, idx, val) dat[idx*2] = ((val & 0xFF00) >> 8); dat[idx*2+1] = (val & 0xFF)
     #define LOAD(dat, idx) (dat[idx*2] << 8) + dat[idx*2+1]
+
+    /* slightly-hostile macro to cut code duplication */
+    #define SIMCOORD(start, i) start + (i) * simcoord_per_tile / TILE_SIZE
 
     void colorize_tile(unsigned char* pixel_depth, unsigned char* pixel_color,  unsigned char* palette_color, int palette_color_len){
         int pixel_depth_idx;
@@ -320,47 +323,46 @@ def compile_unrolled(tile_size, max_recursion, minimum_fractalspace_coord):
     }
 
     void compute_tile(unsigned char* data, long long row, long long col, double simcoord_per_tile) {
-        double coord_step = simcoord_per_tile / TILE_SIZE;
         double start_coord_x = MIN_FRACTACLSPACE_X + col * simcoord_per_tile;
         double start_coord_y = MIN_FRACTACLSPACE_Y + row * simcoord_per_tile;
-        double coord_x = start_coord_x;
-        double coord_y = start_coord_y;
-        double alt_coord = start_coord_x + simcoord_per_tile - coord_step;     /* start_coord_x + simcoord_per_tile is the next tile) */
-        int blacks = 0;
-        int iterations = 0;
-        for( int i=0; i<TILE_SIZE; ++i ){                        /* calculate left & right edges */
-            iterations = mandlebrot(coord_x, coord_y);
-            STORE(data,(i*TILE_SIZE),iterations);                /* data[i*TILE_SIZE] = iterations */
-            if(iterations == MAX_RECURSION) blacks += 1;
-            iterations = mandlebrot(alt_coord, coord_y);
-            STORE(data,(i*TILE_SIZE+TILE_SIZE-1),iterations);    /* data[i*TILE_SIZE+TILE_SIZE-1] = iterations */
-            if(iterations == MAX_RECURSION) blacks += 1;
-            coord_y += coord_step;
-        }
+        double coord_x;
+        double coord_y;
+        double alt_coord;
+        int iterations;
+        int prelimit = 0;                                        /* track edge pixels that do not reach MAX_RECURSION */
+
         coord_x = start_coord_x;
-        coord_y = start_coord_y;
-        alt_coord = start_coord_y + simcoord_per_tile - coord_step;            /* start_coord_y + simcoord_per_tile is the next tile) */
-        for( int i=1; i<TILE_SIZE-1; ++i ){                      /* calculate top & bottom edges */
-            coord_x += coord_step;
+        alt_coord = SIMCOORD(start_coord_x,TILE_SIZE-1);
+        for( int y=0; y<TILE_SIZE; ++y ){                        /* calculate left & right edges */
+            coord_y = SIMCOORD(start_coord_y,y);
             iterations = mandlebrot(coord_x, coord_y);
-            STORE(data,i,iterations);                            /* data[i] = iterations */
-            if(iterations == MAX_RECURSION) blacks += 1;
-            iterations = mandlebrot(coord_x, alt_coord);
-            STORE(data,(TILE_SIZE*(TILE_SIZE-1)+i),iterations);  /* data[TILE_SIZE*(TILE_SIZE-1)+i] = iterations */
-            if(iterations == MAX_RECURSION) blacks += 1;
+            STORE(data,(y*TILE_SIZE),iterations);                /* data[y*TILE_SIZE] = iterations */
+            if(iterations != MAX_RECURSION) prelimit = 1;
+            iterations = mandlebrot(alt_coord, coord_y);
+            STORE(data,(y*TILE_SIZE+TILE_SIZE-1),iterations);    /* data[y*TILE_SIZE+TILE_SIZE-1] = iterations */
+            if(iterations != MAX_RECURSION) prelimit = 1;
         }
-        if( blacks == 4*TILE_SIZE-4 ){                           /* check for easy escape, big speedup inside the set */
+        coord_y = start_coord_y;
+        alt_coord = SIMCOORD(start_coord_y,TILE_SIZE-1);
+        for( int x=1; x<TILE_SIZE-1; ++x ){                      /* calculate top & bottom edges */
+            coord_x = SIMCOORD(start_coord_x,x);
+            iterations = mandlebrot(coord_x, coord_y);
+            STORE(data,x,iterations);                            /* data[x] = iterations */
+            if(iterations != MAX_RECURSION) prelimit = 1;
+            iterations = mandlebrot(coord_x, alt_coord);
+            STORE(data,(TILE_SIZE*(TILE_SIZE-1)+x),iterations);  /* data[TILE_SIZE*(TILE_SIZE-1)+x] = iterations */
+            if(iterations != MAX_RECURSION) prelimit = 1;
+        }
+        if( prelimit == 0 ){                                     /* check for easy escape, big speedup inside the set */
             for( int i=0; i<TILE_SIZE*TILE_SIZE; ++i ){
                 STORE(data,i,MAX_RECURSION);                     /* return all max-iteration "black" pixels */
             }
             return;
         }
-        coord_x = start_coord_x;
         for( int x=1; x<TILE_SIZE-1; ++x ){                      /* fill in the middle */
-            coord_x += coord_step;
-            coord_y = start_coord_y;
+            coord_x = SIMCOORD(start_coord_x,x);
             for( int y=1; y<TILE_SIZE-1; ++y ){
-                coord_y += coord_step;
+                coord_y = SIMCOORD(start_coord_y,y);
                 iterations = mandlebrot(coord_x, coord_y);
                 STORE(data,(x + y*TILE_SIZE),iterations);        /* data[x + y*TILE_SIZE] = iterations */
             }
