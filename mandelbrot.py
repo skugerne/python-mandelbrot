@@ -52,6 +52,7 @@ clickables = {
     'work_remains': 0,
     'num_visible_tiles': 0,
     'autozoom': True,
+    'autozoom_pause_start': None,
     'maxzoomed': False,
     'redraw': True,
     'mousedown': None,
@@ -761,9 +762,11 @@ def handle_input():
     handle_mouse_drag()
 
     # handle autozoom
-    if clickables['autozoom'] and (not clickables['work_remains']) and (not clickables['maxzoomed']):
-        logger.info("Autozoom.")
-        drawing_params.add(zoomlevel = drawing_params.last().zoomlevel + 1)
+    if clickables['autozoom'] and not clickables['maxzoomed'] and not clickables['work_remains']:
+        if not (clickables['autozoom_pause_start'] and time() - clickables['autozoom_pause_start'] < 2):
+            clickables['autozoom_pause_start'] = None
+            logger.info("Autozoom.")
+            drawing_params.add(zoomlevel = drawing_params.last().zoomlevel + 1)
 
     if clickables['redraw']:
         screenstuff.clear()
@@ -805,6 +808,11 @@ def handle_tiles():
                 workunit.used = time()
                 dpl.display_tile(workunit)
         clickables['redraw'] = False
+        clickables['autozoom_pause_start'] = None
+    elif not clickables['work_remains']:
+        clickables['autozoom_pause_start'] = clickables['autozoom_pause_start'] or time()
+    else:
+        clickables['autozoom_pause_start'] = None
 
     # clean up excessive cached images
     if time() < timeout and len(tile_cache) > screenstuff.cache_size:
